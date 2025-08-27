@@ -54,7 +54,6 @@ export function useSimulationData(runId: string): UseSimulationDataReturn {
       eventSourceRef.current = eventSource
       
       eventSource.onopen = () => {
-        console.log('Connected to simulation stream')
         setIsStreaming(true)
       }
       
@@ -81,24 +80,24 @@ export function useSimulationData(runId: string): UseSimulationDataReturn {
               return newHistory
             })
           } else if (data.type === 'status') {
-            console.log('Run status:', data.status)
             if (data.status === 'completed' || data.status === 'failed') {
               setIsStreaming(false)
             }
           }
         } catch (err) {
-          console.error('Error parsing stream data:', err)
+          // Silently handle parsing errors in production
+          if (process.env.NODE_ENV === 'development') {
+            console.error('Error parsing stream data:', err)
+          }
         }
       }
       
       eventSource.onerror = (error) => {
-        console.error('Stream error:', error)
         setIsStreaming(false)
         eventSource.close()
         
         // Attempt to reconnect after 5 seconds
         reconnectTimeoutRef.current = setTimeout(() => {
-          console.log('Attempting to reconnect...')
           connectToStream()
         }, 5000)
       }
@@ -152,7 +151,6 @@ export function useSimulationData(runId: string): UseSimulationDataReturn {
     fetch(`${API_URL}/api/v1/runs/${runId}/stream`, { method: 'HEAD' })
       .then(() => connectToStream())
       .catch(() => {
-        console.log('Stream not available, using simulated data')
         return simulateData()
       })
     

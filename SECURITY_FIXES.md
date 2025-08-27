@@ -90,7 +90,6 @@ Comprehensive security hardening and quality improvements have been applied to t
 - `services/api/main.py` - Added auth, middleware, error handlers
 - `infra/compose/docker-compose.dev.yml` - Environment variables
 - `apps/web/hooks/useSimulationData.ts` - Memory leak fixes
-- `apps/web/components/visualization/VolumeFieldFixed.tsx` - Proper cleanup
 
 ### Test Files
 - `tests/conftest.py` - Test configuration

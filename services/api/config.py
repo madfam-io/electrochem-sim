@@ -100,12 +100,14 @@ def get_settings() -> Settings:
     except Exception as e:
         # Log error and provide helpful message
         import sys
-        print(f"Error loading configuration: {e}", file=sys.stderr)
-        print("\nPlease ensure all required environment variables are set:", file=sys.stderr)
-        print("- JWT_SECRET_KEY (min 32 chars)", file=sys.stderr)
-        print("- DATABASE_URL (PostgreSQL connection string)", file=sys.stderr)
-        print("- REDIS_URL (Redis connection string)", file=sys.stderr)
-        print("\nSee .env.example for reference", file=sys.stderr)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error loading configuration: {e}")
+        logger.error("Please ensure all required environment variables are set:")
+        logger.error("- JWT_SECRET_KEY (min 32 chars)")
+        logger.error("- DATABASE_URL (PostgreSQL connection string)")
+        logger.error("- REDIS_URL (Redis connection string)")
+        logger.error("See .env.example for reference")
         sys.exit(1)
 
 # Create settings instance

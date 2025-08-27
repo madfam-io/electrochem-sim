@@ -260,7 +260,7 @@ if __name__ == "__main__":
     with open("simulation_results.json", "w") as f:
         json.dump(results, f, indent=2)
     
-    print(f"Simulation completed: {len(results)} frames saved")
+    logger.info(f"Simulation completed: {len(results)} frames saved")
     
     # Plot if matplotlib is available
     try:
@@ -277,6 +277,6 @@ if __name__ == "__main__":
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig("current_vs_time.png")
-        print("Plot saved as current_vs_time.png")
+        logger.info("Plot saved as current_vs_time.png")
     except ImportError:
         pass
