@@ -1,0 +1,65 @@
+[tool.poetry]
+name = "galvana"
+version = "0.1.0"
+description = "Phygital Electrochemistry Platform"
+authors = ["Galvana Engineering <engineering@galvana.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.104.0"
+uvicorn = {extras = ["standard"], version = "^0.24.0"}
+pydantic = "^2.5.0"
+sqlalchemy = "^2.0.0"
+asyncpg = "^0.29.0"
+redis = "^5.0.0"
+numpy = "^1.26.0"
+scipy = "^1.11.0"
+pandas = "^2.1.0"
+h5py = "^3.10.0"
+pyyaml = "^6.0"
+httpx = "^0.25.0"
+celery = {extras = ["redis"], version = "^5.3.0"}
+python-multipart = "^0.0.6"
+python-jose = {extras = ["cryptography"], version = "^3.3.0"}
+passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+pytest-asyncio = "^0.21.0"
+pytest-cov = "^4.1.0"
+black = "^23.11.0"
+ruff = "^0.1.0"
+mypy = "^1.7.0"
+ipython = "^8.17.0"
+
+[tool.poetry.group.simulation.dependencies]
+fenics-dolfinx = "^0.7.0"
+petsc4py = "^3.20.0"
+mpi4py = "^3.1.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"

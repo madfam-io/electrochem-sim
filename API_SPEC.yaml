@@ -1,0 +1,1366 @@
+openapi: 3.1.0
+
+info:
+  title: Galvana Electrochemistry Platform API
+  description: |
+    Enterprise-grade phygital electrochemistry platform combining real physics simulation 
+    with live instrument control, calibration, and data management.
+  version: 1.0.0
+  contact:
+    email: engineering@galvana.com
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.galvana.com/v1
+    description: Production
+  - url: https://api.staging.galvana.com/v1
+    description: Staging
+  - url: http://localhost:8080/api/v1
+    description: Local Development
+
+security:
+  - bearerAuth: []
+  - apiKey: []
+
+tags:
+  - name: runs
+    description: Simulation and experiment execution
+  - name: scenarios
+    description: Scenario configuration management
+  - name: instruments
+    description: Hardware instrument control
+  - name: datasets
+    description: Time-series and field data access
+  - name: calibrations
+    description: Parameter fitting and optimization
+
+paths:
+  /runs:
+    post:
+      tags: [runs]
+      summary: Start a new simulation or experiment run
+      operationId: createRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/SimulationRunRequest'
+                - $ref: '#/components/schemas/ExperimentRunRequest'
+            examples:
+              simulation:
+                summary: Start simulation
+                value:
+                  type: simulation
+                  scenario_id: scn_ni_plating_v2
+                  engine: fenicsx
+                  compute:
+                    cpu: 4
+                    memory: 16GB
+              experiment:
+                summary: Start experiment
+                value:
+                  type: experiment
+                  protocol_id: prt_cv_standard
+                  instrument_id: ins_gamry_001
+                  safety_limits:
+                    max_voltage: 5.0
+                    max_current: 1.0
+
+      responses:
+        '202':
+          description: Run accepted and queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunHandle'
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URL of the created run
+            X-Estimated-Duration:
+              schema:
+                type: integer
+              description: Estimated duration in seconds
+
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '402':
+          $ref: '#/components/responses/QuotaExceeded'
+        '503':
+          $ref: '#/components/responses/ResourcesUnavailable'
+
+    get:
+      tags: [runs]
+      summary: List runs with filtering
+      operationId: listRuns
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/RunStatus'
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/RunType'
+        - name: created_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: created_before
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: tags
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/cursor'
+
+      responses:
+        '200':
+          description: Paginated list of runs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunList'
+
+  /runs/{runId}:
+    get:
+      tags: [runs]
+      summary: Get run details
+      operationId: getRun
+      parameters:
+        - $ref: '#/components/parameters/runId'
+        - name: include
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [scenario, datasets, artifacts, metrics]
+
+      responses:
+        '200':
+          description: Run details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags: [runs]
+      summary: Update run (pause/resume/abort)
+      operationId: updateRun
+      parameters:
+        - $ref: '#/components/parameters/runId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [pause, resume, abort]
+                reason:
+                  type: string
+                  description: Required for abort action
+
+      responses:
+        '200':
+          description: Run updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '409':
+          $ref: '#/components/responses/InvalidStateTransition'
+
+  /runs/{runId}/stream:
+    get:
+      tags: [runs]
+      summary: Stream real-time run data
+      operationId: streamRun
+      parameters:
+        - $ref: '#/components/parameters/runId'
+        - name: channels
+          in: query
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [status, frames, logs, events, metrics]
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Start streaming from this timestamp
+
+      responses:
+        '200':
+          description: Server-Sent Events stream
+          content:
+            text/event-stream:
+              schema:
+                type: object
+                properties:
+                  event:
+                    type: string
+                    enum: [frame, status, log, event, metric]
+                  data:
+                    type: object
+                  id:
+                    type: string
+                  retry:
+                    type: integer
+
+  /runs/{runId}/artifacts:
+    get:
+      tags: [runs]
+      summary: List run artifacts
+      operationId: listArtifacts
+      parameters:
+        - $ref: '#/components/parameters/runId'
+        - name: type
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [dataset, plot, report, checkpoint]
+
+      responses:
+        '200':
+          description: List of artifacts with signed URLs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifacts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Artifact'
+
+  /scenarios:
+    post:
+      tags: [scenarios]
+      summary: Create or update scenario
+      operationId: createScenario
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              $ref: '#/components/schemas/ScenarioYAML'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Scenario'
+
+      responses:
+        '201':
+          description: Scenario created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scenario'
+          headers:
+            Location:
+              schema:
+                type: string
+
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+    get:
+      tags: [scenarios]
+      summary: List scenarios
+      operationId: listScenarios
+      parameters:
+        - name: template
+          in: query
+          schema:
+            type: boolean
+          description: Filter for template scenarios
+        - name: tags
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/cursor'
+
+      responses:
+        '200':
+          description: List of scenarios
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScenarioList'
+
+  /scenarios/{scenarioId}:
+    get:
+      tags: [scenarios]
+      summary: Get scenario details
+      operationId: getScenario
+      parameters:
+        - $ref: '#/components/parameters/scenarioId'
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, yaml]
+            default: json
+
+      responses:
+        '200':
+          description: Scenario details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scenario'
+            application/yaml:
+              schema:
+                $ref: '#/components/schemas/ScenarioYAML'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /scenarios/{scenarioId}/validate:
+    post:
+      tags: [scenarios]
+      summary: Validate scenario configuration
+      operationId: validateScenario
+      parameters:
+        - $ref: '#/components/parameters/scenarioId'
+
+      responses:
+        '200':
+          description: Validation results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationResult'
+
+  /instruments:
+    get:
+      tags: [instruments]
+      summary: List available instruments
+      operationId: listInstruments
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [online, offline, busy]
+        - name: vendor
+          in: query
+          schema:
+            type: string
+            enum: [gamry, biologic, autolab]
+        - name: capabilities
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [cv, ca, cp, eis, gitt]
+
+      responses:
+        '200':
+          description: List of instruments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instruments:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Instrument'
+
+  /instruments/{instrumentId}:
+    get:
+      tags: [instruments]
+      summary: Get instrument details
+      operationId: getInstrument
+      parameters:
+        - $ref: '#/components/parameters/instrumentId'
+
+      responses:
+        '200':
+          description: Instrument details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instrument'
+
+  /instruments/{instrumentId}/connect:
+    post:
+      tags: [instruments]
+      summary: Connect to instrument
+      operationId: connectInstrument
+      parameters:
+        - $ref: '#/components/parameters/instrumentId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                connection_params:
+                  type: object
+                  additionalProperties: true
+
+      responses:
+        '200':
+          description: Connection established
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstrumentConnection'
+        '503':
+          $ref: '#/components/responses/InstrumentUnavailable'
+
+  /instruments/{instrumentId}/program:
+    post:
+      tags: [instruments]
+      summary: Program instrument with waveform
+      operationId: programInstrument
+      parameters:
+        - $ref: '#/components/parameters/instrumentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Waveform'
+
+      responses:
+        '200':
+          description: Instrument programmed
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/InstrumentUnavailable'
+
+  /datasets/{runId}/frames:
+    get:
+      tags: [datasets]
+      summary: Query time-series frames
+      operationId: queryFrames
+      parameters:
+        - $ref: '#/components/parameters/runId'
+        - name: start_time
+          in: query
+          schema:
+            type: number
+            format: float
+        - name: end_time
+          in: query
+          schema:
+            type: number
+            format: float
+        - name: variables
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+        - name: downsample
+          in: query
+          schema:
+            type: string
+            enum: [none, avg, max, min]
+        - name: resolution
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/cursor'
+
+      responses:
+        '200':
+          description: Time-series data frames
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FrameData'
+            text/csv:
+              schema:
+                type: string
+            application/parquet:
+              schema:
+                type: string
+                format: binary
+
+  /datasets/{runId}/fields/{timestep}:
+    get:
+      tags: [datasets]
+      summary: Get field data at specific timestep
+      operationId: getFieldData
+      parameters:
+        - $ref: '#/components/parameters/runId'
+        - name: timestep
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: variables
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, hdf5, netcdf, zarr]
+
+      responses:
+        '200':
+          description: Field data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FieldData'
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+  /calibrations:
+    post:
+      tags: [calibrations]
+      summary: Start calibration job
+      operationId: createCalibration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CalibrationRequest'
+
+      responses:
+        '202':
+          description: Calibration job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalibrationJob'
+          headers:
+            Location:
+              schema:
+                type: string
+
+  /calibrations/{calibrationId}:
+    get:
+      tags: [calibrations]
+      summary: Get calibration results
+      operationId: getCalibration
+      parameters:
+        - name: calibrationId
+          in: path
+          required: true
+          schema:
+            type: string
+
+      responses:
+        '200':
+          description: Calibration results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalibrationResult'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    runId:
+      name: runId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^run_[a-zA-Z0-9]+$
+    
+    scenarioId:
+      name: scenarioId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^scn_[a-zA-Z0-9]+$
+    
+    instrumentId:
+      name: instrumentId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^ins_[a-zA-Z0-9]+$
+    
+    limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    
+    cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+
+  schemas:
+    RunType:
+      type: string
+      enum: [simulation, experiment, hybrid]
+
+    RunStatus:
+      type: string
+      enum: [queued, starting, running, paused, completed, failed, aborted]
+
+    SimulationRunRequest:
+      type: object
+      required: [type, scenario]
+      properties:
+        type:
+          type: string
+          enum: [simulation]
+        scenario:
+          oneOf:
+            - type: string
+              description: Scenario ID
+            - $ref: '#/components/schemas/ScenarioYAML'
+        engine:
+          type: string
+          enum: [auto, fenicsx, moose]
+          default: auto
+        compute:
+          $ref: '#/components/schemas/ComputeRequirements'
+        tags:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    ExperimentRunRequest:
+      type: object
+      required: [type, protocol, instrument_id]
+      properties:
+        type:
+          type: string
+          enum: [experiment]
+        protocol:
+          oneOf:
+            - type: string
+              description: Protocol ID
+            - $ref: '#/components/schemas/ExperimentProtocol'
+        instrument_id:
+          type: string
+        safety_limits:
+          $ref: '#/components/schemas/SafetyLimits'
+        tags:
+          type: array
+          items:
+            type: string
+
+    RunHandle:
+      type: object
+      required: [run_id, status]
+      properties:
+        run_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        queue_position:
+          type: integer
+        estimated_start:
+          type: string
+          format: date-time
+        estimated_duration:
+          type: integer
+          description: Seconds
+        stream_url:
+          type: string
+          format: uri
+
+    Run:
+      type: object
+      required: [id, type, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        type:
+          $ref: '#/components/schemas/RunType'
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        scenario:
+          $ref: '#/components/schemas/Scenario'
+        progress:
+          type: object
+          properties:
+            percentage:
+              type: number
+              minimum: 0
+              maximum: 100
+            current_time:
+              type: number
+            total_time:
+              type: number
+            timestep:
+              type: integer
+        metrics:
+          type: object
+          properties:
+            cpu_usage:
+              type: number
+            memory_usage:
+              type: number
+            solver_iterations:
+              type: integer
+            convergence:
+              type: number
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+
+    RunList:
+      type: object
+      required: [runs, pagination]
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Run'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    Scenario:
+      type: object
+      required: [id, name, version, physics, geometry]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        version:
+          type: string
+        description:
+          type: string
+        physics:
+          $ref: '#/components/schemas/PhysicsConfig'
+        geometry:
+          $ref: '#/components/schemas/GeometryConfig'
+        materials:
+          $ref: '#/components/schemas/MaterialsConfig'
+        boundaries:
+          $ref: '#/components/schemas/BoundariesConfig'
+        drive:
+          $ref: '#/components/schemas/DriveConfig'
+        numerics:
+          $ref: '#/components/schemas/NumericsConfig'
+        outputs:
+          $ref: '#/components/schemas/OutputsConfig'
+        tags:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ScenarioYAML:
+      type: string
+      description: YAML representation of scenario
+
+    PhysicsConfig:
+      type: object
+      properties:
+        transport:
+          type: string
+          enum: [nernst_planck, stefan_maxwell]
+        electroneutral:
+          type: boolean
+        potential_model:
+          type: string
+          enum: [poisson, none]
+        heat:
+          type: boolean
+        phase_field:
+          type: boolean
+
+    GeometryConfig:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [1D, 2D, 3D]
+        dimensions:
+          type: object
+        mesh:
+          type: object
+          properties:
+            elements:
+              type: integer
+            refinement:
+              type: object
+
+    MaterialsConfig:
+      type: object
+      properties:
+        electrolyte:
+          type: object
+          properties:
+            species:
+              type: array
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  diffusivity:
+                    type: number
+                  charge:
+                    type: integer
+            conductivity:
+              type: number
+            activity_model:
+              type: string
+        electrode:
+          type: object
+          properties:
+            porosity:
+              type: number
+            tortuosity:
+              type: number
+
+    BoundariesConfig:
+      type: object
+      additionalProperties:
+        type: object
+        properties:
+          type:
+            type: string
+            enum: [electrode, counter, insulation, periodic]
+          reaction:
+            type: string
+          potential:
+            type: number
+
+    DriveConfig:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [potentiostatic, galvanostatic, potentiodynamic]
+        waveform:
+          $ref: '#/components/schemas/Waveform'
+
+    Waveform:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [step, ramp, sine, triangle, cv, pulse]
+        parameters:
+          type: object
+          additionalProperties: true
+
+    NumericsConfig:
+      type: object
+      properties:
+        time_integrator:
+          type: string
+          enum: [BDF, SDIRK, explicit_euler]
+        dt_initial:
+          type: number
+        dt_max:
+          type: number
+        newton_tol:
+          type: number
+        linear_solver:
+          type: string
+          enum: [gmres, bicgstab, direct]
+
+    OutputsConfig:
+      type: object
+      properties:
+        save:
+          type: array
+          items:
+            type: string
+        cadence:
+          type: number
+        format:
+          type: string
+          enum: [hdf5, netcdf, csv, zarr]
+
+    ComputeRequirements:
+      type: object
+      properties:
+        cpu:
+          type: integer
+          minimum: 1
+        memory:
+          type: string
+          pattern: ^\d+[MG]B$
+        gpu:
+          type: boolean
+        priority:
+          type: string
+          enum: [low, normal, high]
+
+    SafetyLimits:
+      type: object
+      properties:
+        max_voltage:
+          type: number
+        max_current:
+          type: number
+        max_power:
+          type: number
+        max_temperature:
+          type: number
+        emergency_contacts:
+          type: array
+          items:
+            type: string
+
+    Instrument:
+      type: object
+      required: [id, vendor, model, status]
+      properties:
+        id:
+          type: string
+        vendor:
+          type: string
+        model:
+          type: string
+        serial_number:
+          type: string
+        status:
+          type: string
+          enum: [online, offline, busy, maintenance]
+        capabilities:
+          type: array
+          items:
+            type: string
+        firmware_version:
+          type: string
+        last_calibration:
+          type: string
+          format: date-time
+        location:
+          type: object
+          properties:
+            lab:
+              type: string
+            bench:
+              type: string
+
+    InstrumentConnection:
+      type: object
+      properties:
+        connection_id:
+          type: string
+        established_at:
+          type: string
+          format: date-time
+        latency_ms:
+          type: number
+        channels:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              type:
+                type: string
+              range:
+                type: object
+
+    FrameData:
+      type: object
+      properties:
+        frames:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: number
+              time:
+                type: number
+              voltage:
+                type: number
+              current:
+                type: number
+              temperature:
+                type: number
+              custom:
+                type: object
+                additionalProperties: true
+        metadata:
+          type: object
+          properties:
+            total_frames:
+              type: integer
+            sampling_rate:
+              type: number
+            units:
+              type: object
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    FieldData:
+      type: object
+      properties:
+        timestep:
+          type: integer
+        time:
+          type: number
+        mesh:
+          type: object
+          properties:
+            nodes:
+              type: array
+              items:
+                type: array
+                items:
+                  type: number
+            elements:
+              type: array
+              items:
+                type: array
+                items:
+                  type: integer
+        fields:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: number
+
+    CalibrationRequest:
+      type: object
+      required: [run_id, method, parameters]
+      properties:
+        run_id:
+          type: string
+        reference_data:
+          type: string
+          description: Dataset ID for experimental reference
+        method:
+          type: string
+          enum: [least_squares, bayesian, genetic, gradient]
+        parameters:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              bounds:
+                type: array
+                items:
+                  type: number
+                minItems: 2
+                maxItems: 2
+              prior:
+                type: object
+        options:
+          type: object
+          properties:
+            max_iterations:
+              type: integer
+            tolerance:
+              type: number
+            parallel:
+              type: boolean
+
+    CalibrationResult:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [running, completed, failed]
+        parameters:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              value:
+                type: number
+              uncertainty:
+                type: number
+              confidence_interval:
+                type: array
+                items:
+                  type: number
+        metrics:
+          type: object
+          properties:
+            rmse:
+              type: number
+            r_squared:
+              type: number
+            aic:
+              type: number
+            bic:
+              type: number
+        diagnostics:
+          type: object
+
+    Artifact:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [dataset, plot, report, checkpoint]
+        name:
+          type: string
+        size:
+          type: integer
+        format:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        url:
+          type: string
+          format: uri
+          description: Signed URL valid for 1 hour
+        checksum:
+          type: string
+
+    ValidationResult:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              message:
+                type: string
+              severity:
+                type: string
+                enum: [error, warning, info]
+        warnings:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              message:
+                type: string
+
+    ScenarioList:
+      type: object
+      properties:
+        scenarios:
+          type: array
+          items:
+            $ref: '#/components/schemas/Scenario'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    ExperimentProtocol:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [cv, ca, cp, eis, gitt, ocv]
+        parameters:
+          type: object
+          additionalProperties: true
+
+    CalibrationJob:
+      type: object
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+        queue_position:
+          type: integer
+        estimated_completion:
+          type: string
+          format: date-time
+
+    Pagination:
+      type: object
+      properties:
+        limit:
+          type: integer
+        cursor:
+          type: string
+        has_more:
+          type: boolean
+        total_count:
+          type: integer
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+            request_id:
+              type: string
+            documentation_url:
+              type: string
+
+  responses:
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Invalid scenario configuration
+              details:
+                field: physics.transport
+                reason: Invalid transport model
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    QuotaExceeded:
+      description: Quota or rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+
+    ResourcesUnavailable:
+      description: Compute resources unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    InstrumentUnavailable:
+      description: Instrument offline or busy
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    InvalidStateTransition:
+      description: Invalid state transition
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+webhooks:
+  runCompleted:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event:
+                  type: string
+                  enum: [run.completed]
+                run_id:
+                  type: string
+                status:
+                  type: string
+                results:
+                  type: object
+                timestamp:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          description: Webhook processed
+        '410':
+          description: Webhook endpoint gone (stop retrying)

@@ -1,0 +1,59 @@
+version: 0.1
+name: Nickel Plating - MVP Demo
+description: Simple nickel electrodeposition scenario for MVP testing
+
+geometry:
+  type: 1D
+  length: 1.0e-3  # 1mm diffusion layer
+  mesh:
+    elements: 100
+
+physics:
+  transport: nernst_planck
+  electroneutral: true
+  potential_model: simplified  # Linear drop for MVP
+
+materials:
+  electrolyte:
+    species:
+      - name: Ni2+
+        D: 6.7e-10    # m²/s - Diffusivity of Ni2+
+        z: 2          # Charge
+        c0: 100.0     # mol/m³ - Initial concentration
+    conductivity: 8.5  # S/m
+    temperature: 298   # K
+
+kinetics:
+  model: butler_volmer
+  exchange_current_density: 2.0  # A/m²
+  alpha_a: 0.5                   # Anodic transfer coefficient
+  alpha_c: 0.5                   # Cathodic transfer coefficient
+
+boundaries:
+  left_electrode:
+    type: electrode
+    reaction: "Ni2+ + 2e- -> Ni(s)"
+  right_boundary:
+    type: bulk
+    concentration: fixed  # Maintain bulk concentration
+
+drive:
+  mode: potentiostatic
+  waveform:
+    type: step
+    V: -0.8       # V vs reference
+    t_end: 60.0   # seconds
+
+numerics:
+  time_integrator: implicit_euler  # Simple for MVP
+  dt_initial: 0.001                # s
+  dt_max: 0.1                      # s
+  tolerance: 1.0e-6
+
+outputs:
+  save:
+    - current_density
+    - concentration
+    - potential
+  cadence: 0.5  # Save every 0.5 seconds
+  format: json

@@ -1,0 +1,812 @@
+openapi: 3.1.0
+
+info:
+  title: Galvana 3D Visualization API
+  description: |
+    API for real-time 3D visualization of electrochemistry experiments,
+    including volumetric rendering, digital twins, and lab environment simulation
+  version: 1.0.0
+
+servers:
+  - url: https://api.galvana.com/viz/v1
+    description: Production Visualization Server
+  - url: ws://stream.galvana.com/viz/v1
+    description: WebSocket Streaming Server
+
+paths:
+  /scenes:
+    post:
+      tags: [Scene Management]
+      summary: Create new 3D laboratory scene
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSceneRequest'
+      responses:
+        '201':
+          description: Scene created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scene'
+          headers:
+            Location:
+              schema:
+                type: string
+                example: /scenes/scn_3d_abc123
+
+  /scenes/{sceneId}:
+    get:
+      tags: [Scene Management]
+      summary: Get scene configuration
+      parameters:
+        - $ref: '#/components/parameters/sceneId'
+        - name: include
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [instruments, materials, lighting, animations]
+      responses:
+        '200':
+          description: Scene details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scene'
+
+    patch:
+      tags: [Scene Management]
+      summary: Update scene elements
+      parameters:
+        - $ref: '#/components/parameters/sceneId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SceneUpdate'
+      responses:
+        '200':
+          description: Scene updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scene'
+
+  /scenes/{sceneId}/render:
+    post:
+      tags: [Rendering]
+      summary: Render scene frame
+      parameters:
+        - $ref: '#/components/parameters/sceneId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenderRequest'
+      responses:
+        '200':
+          description: Rendered frame
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: WebGL framebuffer data
+
+  /scenes/{sceneId}/stream:
+    get:
+      tags: [Streaming]
+      summary: Stream real-time visualization
+      parameters:
+        - $ref: '#/components/parameters/sceneId'
+        - name: quality
+          in: query
+          schema:
+            type: string
+            enum: [low, medium, high, ultra]
+            default: medium
+        - name: fps
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 120
+            default: 60
+      responses:
+        '101':
+          description: Switching to WebSocket protocol
+          headers:
+            Upgrade:
+              schema:
+                type: string
+                example: websocket
+            Connection:
+              schema:
+                type: string
+                example: Upgrade
+
+  /instruments:
+    get:
+      tags: [Digital Twins]
+      summary: List available instrument models
+      parameters:
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [potentiostat, spectrometer, balance, pump, cell]
+        - name: manufacturer
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Instrument library
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instruments:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/InstrumentModel'
+
+  /instruments/{instrumentId}/twin:
+    post:
+      tags: [Digital Twins]
+      summary: Create digital twin instance
+      parameters:
+        - name: instrumentId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DigitalTwinConfig'
+      responses:
+        '201':
+          description: Digital twin created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DigitalTwin'
+
+  /volumes/{runId}:
+    get:
+      tags: [Volumetric Data]
+      summary: Get volumetric visualization data
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: timestep
+          in: query
+          schema:
+            type: integer
+        - name: field
+          in: query
+          schema:
+            type: string
+            enum: [concentration, temperature, pressure, current_density, potential]
+      responses:
+        '200':
+          description: Volume data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VolumeData'
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: Binary volume data (Float32Array)
+
+  /volumes/{runId}/stream:
+    get:
+      tags: [Volumetric Data]
+      summary: Stream volumetric updates
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: fields
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+        - name: compression
+          in: query
+          schema:
+            type: string
+            enum: [none, gzip, brotli]
+            default: gzip
+      responses:
+        '200':
+          description: Server-Sent Events stream
+          content:
+            text/event-stream:
+              schema:
+                type: object
+                properties:
+                  event:
+                    type: string
+                    example: volume_update
+                  data:
+                    $ref: '#/components/schemas/VolumeFrame'
+
+  /materials:
+    get:
+      tags: [Materials]
+      summary: Get material library
+      parameters:
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [metal, electrolyte, polymer, glass, ceramic]
+      responses:
+        '200':
+          description: Material library
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  materials:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Material'
+
+  /materials/{materialId}/preview:
+    get:
+      tags: [Materials]
+      summary: Generate material preview sphere
+      parameters:
+        - name: materialId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: size
+          in: query
+          schema:
+            type: integer
+            default: 256
+      responses:
+        '200':
+          description: Material preview
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+
+components:
+  parameters:
+    sceneId:
+      name: sceneId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^scn_3d_[a-zA-Z0-9]+$
+
+  schemas:
+    CreateSceneRequest:
+      type: object
+      required: [name, layout]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        layout:
+          $ref: '#/components/schemas/LabLayout'
+        lighting:
+          $ref: '#/components/schemas/LightingConfig'
+        environment:
+          $ref: '#/components/schemas/EnvironmentConfig'
+        defaultCamera:
+          $ref: '#/components/schemas/CameraConfig'
+
+    Scene:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        layout:
+          $ref: '#/components/schemas/LabLayout'
+        workbenches:
+          type: array
+          items:
+            $ref: '#/components/schemas/Workbench'
+        instruments:
+          type: array
+          items:
+            $ref: '#/components/schemas/InstrumentInstance'
+        lighting:
+          $ref: '#/components/schemas/LightingConfig'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    LabLayout:
+      type: object
+      properties:
+        dimensions:
+          $ref: '#/components/schemas/Vector3'
+        floorMaterial:
+          type: string
+        wallMaterial:
+          type: string
+        ceilingHeight:
+          type: number
+        workbenchPositions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transform'
+
+    Workbench:
+      type: object
+      properties:
+        id:
+          type: string
+        position:
+          $ref: '#/components/schemas/Vector3'
+        rotation:
+          $ref: '#/components/schemas/Vector3'
+        dimensions:
+          $ref: '#/components/schemas/Vector3'
+        material:
+          type: string
+        slots:
+          type: array
+          items:
+            $ref: '#/components/schemas/EquipmentSlot'
+
+    EquipmentSlot:
+      type: object
+      properties:
+        id:
+          type: string
+        position:
+          $ref: '#/components/schemas/Vector3'
+        size:
+          type: string
+          enum: [small, medium, large]
+        type:
+          type: string
+          enum: [standard, fume_hood, balance_table, heated]
+        occupied:
+          type: boolean
+        equipment:
+          $ref: '#/components/schemas/Equipment'
+
+    InstrumentModel:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        manufacturer:
+          type: string
+        category:
+          type: string
+        modelUrl:
+          type: string
+        textureUrl:
+          type: string
+        dimensions:
+          $ref: '#/components/schemas/Vector3'
+        capabilities:
+          type: array
+          items:
+            type: string
+        materials:
+          type: object
+          additionalProperties:
+            type: string
+
+    InstrumentInstance:
+      type: object
+      properties:
+        id:
+          type: string
+        modelId:
+          type: string
+        position:
+          $ref: '#/components/schemas/Vector3'
+        rotation:
+          $ref: '#/components/schemas/Vector3'
+        scale:
+          $ref: '#/components/schemas/Vector3'
+        state:
+          type: object
+          properties:
+            power:
+              type: boolean
+            connected:
+              type: boolean
+            display:
+              type: object
+            leds:
+              type: array
+              items:
+                type: object
+                properties:
+                  color:
+                    type: string
+                  intensity:
+                    type: number
+
+    DigitalTwinConfig:
+      type: object
+      properties:
+        instrumentId:
+          type: string
+        connectionUrl:
+          type: string
+        syncInterval:
+          type: integer
+        sensorMapping:
+          type: object
+          additionalProperties:
+            type: string
+
+    DigitalTwin:
+      type: object
+      properties:
+        id:
+          type: string
+        instrumentId:
+          type: string
+        modelId:
+          type: string
+        status:
+          type: string
+          enum: [connected, disconnected, syncing, error]
+        lastSync:
+          type: string
+          format: date-time
+        sensorData:
+          type: object
+          additionalProperties:
+            type: number
+        predictions:
+          type: object
+
+    VolumeData:
+      type: object
+      properties:
+        dimensions:
+          $ref: '#/components/schemas/Vector3Int'
+        spacing:
+          $ref: '#/components/schemas/Vector3'
+        origin:
+          $ref: '#/components/schemas/Vector3'
+        field:
+          type: string
+        data:
+          type: array
+          items:
+            type: number
+        min:
+          type: number
+        max:
+          type: number
+        timestamp:
+          type: number
+
+    VolumeFrame:
+      type: object
+      properties:
+        timestep:
+          type: integer
+        time:
+          type: number
+        fields:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              data:
+                type: array
+                items:
+                  type: number
+              changed_indices:
+                type: array
+                items:
+                  type: integer
+
+    Material:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        category:
+          type: string
+        properties:
+          type: object
+          properties:
+            color:
+              type: string
+            metalness:
+              type: number
+            roughness:
+              type: number
+            transparency:
+              type: number
+            ior:
+              type: number
+            emissive:
+              type: string
+            emissiveIntensity:
+              type: number
+        maps:
+          type: object
+          properties:
+            diffuse:
+              type: string
+            normal:
+              type: string
+            roughness:
+              type: string
+            metalness:
+              type: string
+            ao:
+              type: string
+
+    RenderRequest:
+      type: object
+      properties:
+        camera:
+          $ref: '#/components/schemas/CameraConfig'
+        quality:
+          type: string
+          enum: [draft, preview, production, raytraced]
+        resolution:
+          type: object
+          properties:
+            width:
+              type: integer
+            height:
+              type: integer
+        effects:
+          type: array
+          items:
+            type: string
+            enum: [bloom, dof, motion_blur, ssao, ssr, volumetric_fog]
+
+    CameraConfig:
+      type: object
+      properties:
+        position:
+          $ref: '#/components/schemas/Vector3'
+        target:
+          $ref: '#/components/schemas/Vector3'
+        fov:
+          type: number
+        near:
+          type: number
+        far:
+          type: number
+        type:
+          type: string
+          enum: [perspective, orthographic]
+
+    LightingConfig:
+      type: object
+      properties:
+        ambient:
+          type: object
+          properties:
+            color:
+              type: string
+            intensity:
+              type: number
+        directional:
+          type: array
+          items:
+            type: object
+            properties:
+              direction:
+                $ref: '#/components/schemas/Vector3'
+              color:
+                type: string
+              intensity:
+                type: number
+              castShadow:
+                type: boolean
+        point:
+          type: array
+          items:
+            type: object
+            properties:
+              position:
+                $ref: '#/components/schemas/Vector3'
+              color:
+                type: string
+              intensity:
+                type: number
+              distance:
+                type: number
+        spot:
+          type: array
+          items:
+            type: object
+            properties:
+              position:
+                $ref: '#/components/schemas/Vector3'
+              target:
+                $ref: '#/components/schemas/Vector3'
+              color:
+                type: string
+              intensity:
+                type: number
+              angle:
+                type: number
+              penumbra:
+                type: number
+
+    EnvironmentConfig:
+      type: object
+      properties:
+        hdri:
+          type: string
+        fog:
+          type: object
+          properties:
+            color:
+              type: string
+            near:
+              type: number
+            far:
+              type: number
+        temperature:
+          type: number
+        humidity:
+          type: number
+
+    SceneUpdate:
+      type: object
+      properties:
+        instruments:
+          type: object
+          properties:
+            add:
+              type: array
+              items:
+                $ref: '#/components/schemas/InstrumentInstance'
+            remove:
+              type: array
+              items:
+                type: string
+            update:
+              type: array
+              items:
+                $ref: '#/components/schemas/InstrumentInstance'
+        lighting:
+          $ref: '#/components/schemas/LightingConfig'
+        camera:
+          $ref: '#/components/schemas/CameraConfig'
+
+    Vector3:
+      type: object
+      properties:
+        x:
+          type: number
+        y:
+          type: number
+        z:
+          type: number
+
+    Vector3Int:
+      type: object
+      properties:
+        x:
+          type: integer
+        y:
+          type: integer
+        z:
+          type: integer
+
+    Transform:
+      type: object
+      properties:
+        position:
+          $ref: '#/components/schemas/Vector3'
+        rotation:
+          $ref: '#/components/schemas/Vector3'
+        scale:
+          $ref: '#/components/schemas/Vector3'
+
+    Equipment:
+      type: object
+      discriminator:
+        propertyName: type
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        name:
+          type: string
+        modelUrl:
+          type: string
+
+webhooks:
+  instrumentStateChanged:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event:
+                  type: string
+                  enum: [instrument.state_changed]
+                instrumentId:
+                  type: string
+                changes:
+                  type: object
+                timestamp:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          description: Webhook processed
+
+  volumeDataReady:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event:
+                  type: string
+                  enum: [volume.data_ready]
+                runId:
+                  type: string
+                timestep:
+                  type: integer
+                fields:
+                  type: array
+                  items:
+                    type: string
+                url:
+                  type: string
+                  format: uri
+      responses:
+        '200':
+          description: Webhook processed
