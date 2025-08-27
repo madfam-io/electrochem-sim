@@ -2,7 +2,7 @@
 Pydantic models with proper validation for API endpoints
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, EmailStr
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
@@ -240,3 +240,70 @@ class RunResponse(BaseModel):
         json_encoders = {
             datetime: lambda v: v.isoformat()
         }
+
+# User management models
+class User(BaseModel):
+    """User model"""
+    id: str
+    username: str
+    email: EmailStr
+    full_name: Optional[str]
+    role: str = "user"
+    is_active: bool = True
+    is_superuser: bool = False
+
+class UserCreate(BaseModel):
+    """User creation model"""
+    username: str = Field(..., min_length=3, max_length=50, regex="^[a-zA-Z0-9_-]+$")
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=100)
+    full_name: Optional[str] = Field(None, max_length=255)
+    role: Optional[str] = Field("user", regex="^(user|researcher|admin|superuser)$")
+    is_superuser: Optional[bool] = False
+    
+    @validator('password')
+    def validate_password_strength(cls, v):
+        """Ensure password meets security requirements"""
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        if not re.search(r"[A-Z]", v):
+            raise ValueError("Password must contain at least one uppercase letter")
+        if not re.search(r"[a-z]", v):
+            raise ValueError("Password must contain at least one lowercase letter")
+        if not re.search(r"\d", v):
+            raise ValueError("Password must contain at least one digit")
+        return v
+
+class UserUpdate(BaseModel):
+    """User update model"""
+    full_name: Optional[str] = Field(None, max_length=255)
+    email: Optional[EmailStr]
+    role: Optional[str] = Field(None, regex="^(user|researcher|admin|superuser)$")
+    is_active: Optional[bool]
+
+class PasswordChange(BaseModel):
+    """Password change model"""
+    current_password: str
+    new_password: str = Field(..., min_length=8, max_length=100)
+    
+    @validator('new_password')
+    def validate_password_strength(cls, v, values):
+        """Ensure new password meets requirements and differs from current"""
+        if 'current_password' in values and v == values['current_password']:
+            raise ValueError("New password must be different from current password")
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        if not re.search(r"[A-Z]", v):
+            raise ValueError("Password must contain at least one uppercase letter")
+        if not re.search(r"[a-z]", v):
+            raise ValueError("Password must contain at least one lowercase letter")
+        if not re.search(r"\d", v):
+            raise ValueError("Password must contain at least one digit")
+        return v
+
+class Token(BaseModel):
+    """Token response model"""
+    access_token: str
+    refresh_token: Optional[str]
+    token_type: str = "bearer"
+    expires_in: int

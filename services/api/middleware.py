@@ -27,13 +27,22 @@ limiter = Limiter(
 def setup_middleware(app: FastAPI) -> None:
     """Configure all middleware for the application"""
     
-    # CORS Configuration
+    # CORS Configuration - Restrictive for security
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+        allow_headers=[
+            "Accept",
+            "Accept-Language", 
+            "Content-Type",
+            "Content-Language",
+            "Authorization",
+            "X-Request-ID",
+            "X-CSRF-Token"
+        ],
+        expose_headers=["X-Request-ID", "X-Total-Count"],
         max_age=3600,
     )
     

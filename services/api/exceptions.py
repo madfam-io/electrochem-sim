@@ -186,9 +186,21 @@ async def generic_exception_handler(request: Request, exc: Exception):
         exc_info=True
     )
     
-    # Don't expose internal details in production
+    # NEVER expose internal details in production
     from services.api.config import settings
-    message = str(exc) if settings.debug else "An internal error occurred"
+    
+    # Sanitize error message for production
+    if settings.environment == "production":
+        message = "An internal error occurred. Please try again later."
+        details = {"request_id": request_id}
+    else:
+        # Only show details in development
+        message = f"{exc.__class__.__name__}: {str(exc)}"
+        details = {
+            "request_id": request_id,
+            "exception": exc.__class__.__name__,
+            "traceback": traceback.format_exc().split('\n')[-5:] if settings.debug else None
+        }
     
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -196,7 +208,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
             "error": {
                 "code": "INTERNAL_ERROR",
                 "message": message,
-                "request_id": request_id,
+                "details": details,
                 "timestamp": datetime.utcnow().isoformat()
             }
         }
