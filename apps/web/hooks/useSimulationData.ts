@@ -27,6 +27,8 @@ export function useSimulationData(runId: string): UseSimulationDataReturn {
   const [history, setHistory] = useState<SimulationFrame[]>([])
   const eventSourceRef = useRef<EventSource | null>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>()
+  const intervalRef = useRef<NodeJS.Timeout>()
+  const MAX_HISTORY_SIZE = 100
   
   // Fetch initial run data
   const { data: runData, isLoading, error } = useQuery({
@@ -71,7 +73,13 @@ export function useSimulationData(runId: string): UseSimulationDataReturn {
             }
             
             setCurrentFrame(frame)
-            setHistory(prev => [...prev.slice(-99), frame]) // Keep last 100 frames
+            setHistory(prev => {
+              // Prevent unbounded growth
+              const newHistory = prev.length >= MAX_HISTORY_SIZE 
+                ? [...prev.slice(-(MAX_HISTORY_SIZE - 1)), frame]
+                : [...prev, frame]
+              return newHistory
+            })
           } else if (data.type === 'status') {
             console.log('Run status:', data.status)
             if (data.status === 'completed' || data.status === 'failed') {
@@ -98,8 +106,13 @@ export function useSimulationData(runId: string): UseSimulationDataReturn {
     
     // For demo purposes, simulate data if no real stream is available
     const simulateData = () => {
+      // Clear any existing interval
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current)
+      }
+      
       let timestep = 0
-      const interval = setInterval(() => {
+      intervalRef.current = setInterval(() => {
         const time = timestep * 0.1
         const frame: SimulationFrame = {
           time,
@@ -115,18 +128,24 @@ export function useSimulationData(runId: string): UseSimulationDataReturn {
         }
         
         setCurrentFrame(frame)
-        setHistory(prev => [...prev.slice(-99), frame])
+        setHistory(prev => {
+          const newHistory = prev.length >= MAX_HISTORY_SIZE 
+            ? [...prev.slice(-(MAX_HISTORY_SIZE - 1)), frame]
+            : [...prev, frame]
+          return newHistory
+        })
         timestep++
         
         if (timestep > 600) { // Stop after 60 seconds simulation time
-          clearInterval(interval)
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current)
+            intervalRef.current = undefined
+          }
           setIsStreaming(false)
         }
       }, 100) // Update every 100ms
       
       setIsStreaming(true)
-      
-      return () => clearInterval(interval)
     }
     
     // Try to connect to real stream, fall back to simulation
@@ -141,10 +160,18 @@ export function useSimulationData(runId: string): UseSimulationDataReturn {
     return () => {
       if (eventSourceRef.current) {
         eventSourceRef.current.close()
+        eventSourceRef.current = null
       }
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current)
+        reconnectTimeoutRef.current = undefined
       }
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current)
+        intervalRef.current = undefined
+      }
+      // Clear history on unmount to prevent memory leaks
+      setHistory([])
     }
   }, [runId])
   

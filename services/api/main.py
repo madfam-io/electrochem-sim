@@ -1,50 +1,41 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from fastapi.security import OAuth2PasswordRequestForm
 from typing import Optional, List, Dict, Any
-from datetime import datetime
-from enum import Enum
+from datetime import datetime, timedelta
 import asyncio
 import uuid
 import logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Import local modules
+from services.api.config import settings
+from services.api.models import (
+    RunStatus, RunType, SimulationEngine,
+    CreateRunRequest, UpdateRunRequest,
+    RunResponse, ScenarioCreate
+)
+from services.api.auth import (
+    authenticate_user, create_access_token,
+    get_current_active_user, require_user,
+    Token, User, ACCESS_TOKEN_EXPIRE_MINUTES
+)
+from services.api.middleware import setup_middleware, create_rate_limit
+from services.api.exceptions import (
+    register_exception_handlers,
+    ResourceNotFoundException,
+    SimulationException,
+    ValidationException
+)
+from services.api.logging_config import setup_logging, get_logger
 
-
-class RunStatus(str, Enum):
-    QUEUED = "queued"
-    STARTING = "starting"
-    RUNNING = "running"
-    PAUSED = "paused"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    ABORTED = "aborted"
-
-
-class RunType(str, Enum):
-    SIMULATION = "simulation"
-    EXPERIMENT = "experiment"
-
-
-class SimulationEngine(str, Enum):
-    AUTO = "auto"
-    FENICSX = "fenicsx"
-    MOOSE = "moose"
-
-
-class CreateRunRequest(BaseModel):
-    type: RunType = RunType.SIMULATION
-    scenario_id: Optional[str] = None
-    scenario_yaml: Optional[str] = None
-    engine: SimulationEngine = SimulationEngine.AUTO
-    tags: List[str] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+# Configure logging
+setup_logging()
+logger = get_logger(__name__)
 
 
 class RunHandle(BaseModel):
+    """Simplified response for run creation"""
     run_id: str
     status: RunStatus
     queue_position: Optional[int] = None
@@ -107,17 +98,39 @@ app = FastAPI(
     title="Galvana API",
     description="Phygital Electrochemistry Platform API",
     version="0.1.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url="/api/docs" if settings.environment != "production" else None,
+    redoc_url="/api/redoc" if settings.environment != "production" else None,
 )
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Setup all middleware (CORS, security, rate limiting, etc.)
+setup_middleware(app)
+
+# Register exception handlers
+register_exception_handlers(app)
+
+
+@app.post("/api/v1/auth/token", response_model=Token)
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Authenticate and receive access token"""
+    user = authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/api/v1/auth/me", response_model=User)
+async def get_current_user_info(current_user: User = Depends(get_current_active_user)):
+    """Get current user information"""
+    return current_user
 
 
 @app.get("/health", response_model=HealthCheck)
@@ -135,7 +148,8 @@ async def health_check():
 @app.post("/api/v1/runs", response_model=RunHandle, status_code=202)
 async def create_run(
     request: CreateRunRequest,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user)
 ):
     """Create and queue a new simulation run"""
     run_id = f"run_{uuid.uuid4().hex[:12]}"
@@ -164,7 +178,8 @@ async def create_run(
 @app.get("/api/v1/runs", response_model=List[Run])
 async def list_runs(
     status: Optional[RunStatus] = None,
-    limit: int = 20
+    limit: int = 20,
+    current_user: User = Depends(get_current_active_user)
 ):
     """List runs with optional filtering"""
     runs = list(runs_store.values())
@@ -176,10 +191,13 @@ async def list_runs(
 
 
 @app.get("/api/v1/runs/{run_id}", response_model=Run)
-async def get_run(run_id: str):
+async def get_run(
+    run_id: str,
+    current_user: User = Depends(get_current_active_user)
+):
     """Get run details"""
     if run_id not in runs_store:
-        raise HTTPException(404, "Run not found")
+        raise ResourceNotFoundException("Run", run_id)
     
     return runs_store[run_id]
 
