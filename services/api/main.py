@@ -354,6 +354,161 @@ async def update_run(
     db.commit()
     return {"message": f"Run {run_id} updated successfully"}
 
+@app.post("/api/v1/runs/{run_id}/execute", response_model=Dict[str, Any])
+async def execute_run(
+    run_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Execute a run on the HAL service (hardware or simulation)
+
+    This endpoint triggers the physical start of an experiment by:
+    1. Fetching the Run configuration from the database
+    2. Converting it to HAL schema (driver, waveform, technique)
+    3. Calling HAL service to start the experiment
+    4. HAL publishes telemetry to Redis -> API forwards to WebSocket
+
+    Flow:
+        Frontend -> POST /api/v1/runs/{run_id}/execute -> HAL /start_run
+        HAL -> Redis pub (run:{run_id}:telemetry) -> API WebSocket sub -> Frontend
+
+    Args:
+        run_id: Run identifier
+        current_user: Authenticated user
+        db: Database session
+
+    Returns:
+        Dict with execution status and telemetry channel
+    """
+    from services.api.clients.hal import get_hal_client
+
+    # Fetch run from database
+    run = db.query(RunModel).filter(
+        RunModel.id == run_id,
+        (RunModel.user_id == current_user.id) | (current_user.is_superuser == True)
+    ).first()
+
+    if not run:
+        raise ResourceNotFoundException("Run", run_id)
+
+    # Validate run is in correct status (queued or paused)
+    current_status = RunStatus(run.status)
+    if current_status not in [RunStatus.QUEUED, RunStatus.PAUSED]:
+        raise ValidationException(
+            f"Cannot execute run in status {current_status}. Must be QUEUED or PAUSED.",
+            field="status"
+        )
+
+    # Fetch scenario if linked
+    scenario = None
+    if run.scenario_id:
+        scenario = db.query(ScenarioModel).filter(
+            ScenarioModel.id == run.scenario_id
+        ).first()
+        if not scenario:
+            raise ResourceNotFoundException("Scenario", run.scenario_id)
+
+    # Convert Run + Scenario to HAL schema
+    # For MVP: Use mock driver with default CV waveform
+    # TODO: Parse scenario YAML to extract technique and waveform parameters
+
+    driver_name = run.metadata.get("driver", "mock") if run.metadata else "mock"
+    connection_id = f"conn_{run.id}"
+
+    # Extract waveform from scenario or use defaults
+    if scenario:
+        # Parse drive section from scenario
+        drive = scenario.drive or {}
+        technique = drive.get("mode", "cyclic_voltammetry")
+
+        # Parse waveform parameters
+        waveform_config = drive.get("waveform", {})
+        waveform = {
+            "type": waveform_config.get("type", "triangle"),
+            "initial_value": waveform_config.get("initial_value", -0.5),
+            "final_value": waveform_config.get("final_value", 0.5),
+            "duration": waveform_config.get("duration", 10.0)
+        }
+    else:
+        # Default CV parameters
+        technique = "cyclic_voltammetry"
+        waveform = {
+            "type": "triangle",
+            "initial_value": -0.5,
+            "final_value": 0.5,
+            "duration": 10.0
+        }
+
+    # Call HAL service
+    try:
+        async with get_hal_client() as hal_client:
+            # Check HAL health
+            health = await hal_client.health_check()
+            if health.status != "healthy":
+                raise Exception(f"HAL service is {health.status}")
+
+            # Connect to instrument (if not already connected)
+            # Check if connection exists first
+            connections = await hal_client.list_connections()
+            existing_connection = next(
+                (c for c in connections.get("connections", [])
+                 if c.get("connection_id") == connection_id),
+                None
+            )
+
+            if not existing_connection:
+                connect_response = await hal_client.connect(
+                    driver_name=driver_name,
+                    connection_id=connection_id,
+                    config={"seed": 42, "noise_level": 0.05}
+                )
+                logger.info(
+                    f"Connected to HAL: {connect_response.connection_id} "
+                    f"({connect_response.driver_name})"
+                )
+
+            # Start run
+            start_response = await hal_client.start_run(
+                connection_id=connection_id,
+                run_id=run_id,
+                technique=technique,
+                waveform=waveform
+            )
+
+            logger.info(
+                f"Started run on HAL: {start_response.run_id} "
+                f"(channel: {start_response.telemetry_channel})"
+            )
+
+    except Exception as e:
+        logger.error(f"Failed to execute run on HAL: {e}")
+
+        # Update run status to failed
+        run.status = RunStatus.FAILED.value
+        run.error = {"message": f"HAL execution failed: {str(e)}"}
+        run.completed_at = datetime.utcnow()
+        db.commit()
+
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to execute run on HAL service: {str(e)}"
+        )
+
+    # Update run status to running
+    run.status = RunStatus.RUNNING.value
+    run.started_at = datetime.utcnow()
+    db.commit()
+
+    return {
+        "run_id": run_id,
+        "status": "running",
+        "connection_id": connection_id,
+        "telemetry_channel": start_response.telemetry_channel,
+        "message": "Run started successfully on HAL service",
+        "websocket_url": f"/ws/runs/{run_id}"
+    }
+
 # ============= Scenario Management (All Protected) =============
 
 @app.post("/api/v1/scenarios", response_model=Dict[str, str], status_code=201)

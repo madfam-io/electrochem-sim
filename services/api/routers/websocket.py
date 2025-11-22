@@ -19,12 +19,14 @@ from typing import Dict, Optional, Set
 from datetime import datetime
 from sqlalchemy.orm import Session
 import logging
+import redis.asyncio as aioredis
 
 from services.api.database import get_db, Run as RunModel
 from services.api.models import RunStatus, User
 from services.api.auth_service import get_current_user_from_token
 from services.api.utils.backpressure import BackpressureController, backpressure_monitor
 from services.api.exceptions import ResourceNotFoundException
+from services.api.config import settings
 from prometheus_client import Counter, Gauge
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,18 @@ websocket_disconnections_total = Counter(
     ["reason"]  # client_disconnect, error, server_close
 )
 
+redis_messages_received_total = Counter(
+    "galvana_redis_messages_received_total",
+    "Total messages received from Redis telemetry channels",
+    ["run_id"]
+)
+
+redis_subscribe_errors_total = Counter(
+    "galvana_redis_subscribe_errors_total",
+    "Total Redis subscription errors",
+    ["run_id"]
+)
+
 
 class ConnectionManager:
     """
@@ -79,6 +93,9 @@ class ConnectionManager:
 
         # Backpressure controllers: {run_id: controller}
         self.controllers: Dict[str, BackpressureController] = {}
+
+        # Redis subscriber tasks: {run_id: task}
+        self.redis_tasks: Dict[str, asyncio.Task] = {}
 
         logger.info(
             f"ConnectionManager initialized: "
@@ -155,6 +172,12 @@ class ConnectionManager:
             f"user_connections={self.get_user_connection_count(user_id)}/{self.max_connections_per_user}"
         )
 
+        # Start Redis subscriber task
+        redis_task = asyncio.create_task(
+            self.subscribe_to_redis(run_id, controller)
+        )
+        self.redis_tasks[run_id] = redis_task
+
         return controller
 
     async def disconnect(self, run_id: str, user_id: str, reason: str = "client_disconnect"):
@@ -166,6 +189,15 @@ class ConnectionManager:
             user_id: User identifier
             reason: Reason for disconnection
         """
+        # Cancel Redis subscriber task
+        if run_id in self.redis_tasks:
+            self.redis_tasks[run_id].cancel()
+            try:
+                await self.redis_tasks[run_id]
+            except asyncio.CancelledError:
+                pass
+            del self.redis_tasks[run_id]
+
         # Close controller
         if run_id in self.controllers:
             await self.controllers[run_id].close()
@@ -223,6 +255,108 @@ class ConnectionManager:
             websocket_messages_total.labels(run_id=run_id, type=message_type).inc()
         except Exception as e:
             logger.error(f"Failed to send message to run {run_id}: {e}")
+
+    async def subscribe_to_redis(
+        self,
+        run_id: str,
+        controller: BackpressureController
+    ):
+        """
+        Subscribe to Redis telemetry channel and forward messages to WebSocket
+
+        This method runs as a background task for each WebSocket connection.
+        When HAL publishes telemetry to Redis channel run:{run_id}:telemetry,
+        this subscriber forwards it to the WebSocket client via the backpressure controller.
+
+        Args:
+            run_id: Run identifier
+            controller: Backpressure controller for this connection
+
+        Solarpunk Efficiency:
+        - Per-connection subscription (no wasted CPU for unwatched runs)
+        - Automatic cleanup on disconnect
+        - Respects backpressure controller for frame dropping
+        """
+        redis_client: Optional[aioredis.Redis] = None
+        pubsub: Optional[aioredis.client.PubSub] = None
+
+        try:
+            # Create Redis client
+            redis_client = await aioredis.from_url(
+                settings.redis_url,
+                encoding="utf-8",
+                decode_responses=True
+            )
+
+            # Create pub/sub connection
+            pubsub = redis_client.pubsub()
+
+            # Subscribe to telemetry channel
+            channel = f"run:{run_id}:telemetry"
+            await pubsub.subscribe(channel)
+
+            logger.info(f"Subscribed to Redis channel: {channel}")
+
+            # Listen for messages
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    try:
+                        # Parse JSON frame from HAL
+                        frame_data = json.loads(message["data"])
+
+                        # Check if it's a keyframe
+                        is_keyframe = frame_data.get("is_keyframe", False)
+
+                        # Enqueue with backpressure control
+                        enqueued = await controller.enqueue(frame_data, is_keyframe=is_keyframe)
+
+                        if enqueued:
+                            redis_messages_received_total.labels(run_id=run_id).inc()
+                        else:
+                            logger.debug(
+                                f"Redis frame dropped due to backpressure: run={run_id}, "
+                                f"timestep={frame_data.get('timestep', 'unknown')}"
+                            )
+
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Invalid JSON from Redis channel {channel}: {e}")
+                        redis_subscribe_errors_total.labels(run_id=run_id).inc()
+                    except Exception as e:
+                        logger.error(f"Error processing Redis message for run {run_id}: {e}")
+                        redis_subscribe_errors_total.labels(run_id=run_id).inc()
+
+        except asyncio.CancelledError:
+            logger.info(f"Redis subscriber cancelled for run {run_id}")
+            raise
+
+        except Exception as e:
+            logger.error(f"Redis subscription error for run {run_id}: {e}")
+            redis_subscribe_errors_total.labels(run_id=run_id).inc()
+
+            # Send error to client
+            await controller.enqueue({
+                "type": "event",
+                "event": "redis_error",
+                "message": "Lost connection to telemetry stream",
+                "error": str(e)
+            }, is_keyframe=True)
+
+        finally:
+            # Cleanup
+            if pubsub:
+                try:
+                    await pubsub.unsubscribe(f"run:{run_id}:telemetry")
+                    await pubsub.close()
+                except Exception as e:
+                    logger.error(f"Error closing Redis pubsub for run {run_id}: {e}")
+
+            if redis_client:
+                try:
+                    await redis_client.close()
+                except Exception as e:
+                    logger.error(f"Error closing Redis client for run {run_id}: {e}")
+
+            logger.info(f"Redis subscriber cleaned up for run {run_id}")
 
 
 # Global connection manager
@@ -323,7 +457,8 @@ async def websocket_endpoint(
             "event": "connected",
             "run_id": run_id,
             "timestamp": datetime.utcnow().isoformat(),
-            "message": "WebSocket connection established",
+            "message": "WebSocket connection established (subscribed to Redis telemetry)",
+            "telemetry_channel": f"run:{run_id}:telemetry",
             "backpressure": {
                 "max_queue_size": controller.max_queue_size,
                 "slow_threshold": controller.slow_threshold,
@@ -331,12 +466,8 @@ async def websocket_endpoint(
             }
         })
 
-        # Start simulation worker (async task)
-        simulation_task = asyncio.create_task(
-            simulate_and_stream(run_id, controller, db)
-        )
-
         # Stream frames to client with backpressure control
+        # Frames are populated by the Redis subscriber task (started in connect())
         try:
             async for frame in controller.stream():
                 # Add connection metadata
@@ -355,7 +486,6 @@ async def websocket_endpoint(
 
         except asyncio.CancelledError:
             logger.info(f"WebSocket stream cancelled for run {run_id}")
-            simulation_task.cancel()
 
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from run {run_id}")
@@ -389,73 +519,3 @@ async def websocket_endpoint(
             pass
 
         await websocket.close(code=1011, reason="Internal server error")
-
-
-async def simulate_and_stream(
-    run_id: str,
-    controller: BackpressureController,
-    db: Session
-):
-    """
-    Run simulation and stream frames to backpressure controller
-
-    This is a placeholder that will be replaced with actual simulation logic
-    in the solver refactor task.
-
-    Args:
-        run_id: Run identifier
-        controller: Backpressure controller for this connection
-        db: Database session
-    """
-    # TODO: Import actual simulation solver in next task
-    # For now, simulate with dummy data
-
-    try:
-        timestep = 0
-        max_timesteps = 1000
-        dt = 0.1  # 100ms per frame = 10 Hz
-
-        while timestep < max_timesteps:
-            # Simulate frame generation
-            await asyncio.sleep(dt)
-
-            # Every 10th frame is a keyframe
-            is_keyframe = (timestep % 10 == 0)
-
-            frame = {
-                "type": "frame",
-                "timestep": timestep,
-                "time": timestep * dt,
-                "data": {
-                    "current_density": -2.5 + (timestep * 0.001),
-                    "voltage": -0.8,
-                    "concentration_surface": 100.0 - (timestep * 0.01)
-                },
-                "is_keyframe": is_keyframe
-            }
-
-            # Enqueue with backpressure
-            enqueued = await controller.enqueue(frame, is_keyframe=is_keyframe)
-
-            if not enqueued and not is_keyframe:
-                logger.debug(f"Frame {timestep} dropped due to backpressure")
-
-            timestep += 1
-
-        # Send completion message
-        await controller.enqueue({
-            "type": "status",
-            "status": "completed",
-            "message": "Simulation completed successfully",
-            "final_timestep": timestep
-        }, is_keyframe=True)
-
-    except asyncio.CancelledError:
-        logger.info(f"Simulation task cancelled for run {run_id}")
-    except Exception as e:
-        logger.error(f"Simulation error for run {run_id}: {e}")
-        await controller.enqueue({
-            "type": "status",
-            "status": "failed",
-            "error": str(e)
-        }, is_keyframe=True)
