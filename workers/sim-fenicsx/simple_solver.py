@@ -2,12 +2,15 @@
 """
 Simple 1D Nernst-Planck solver for MVP
 Uses finite differences for easy setup without FEniCSx dependencies
+
+SPRINT 2: Async generator with keyframe support for WebSocket streaming
 """
 
+import asyncio
 import numpy as np
 from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
-from typing import Dict, Any, Iterator
+from typing import Dict, Any, Iterator, AsyncIterator
 import json
 import logging
 
@@ -72,23 +75,27 @@ class SimpleElectrochemistrySolver:
         self.phi = np.zeros(self.nx + 1)
         
     def solve(self) -> Iterator[Dict[str, Any]]:
-        """Main time-stepping loop"""
+        """
+        Main time-stepping loop (synchronous)
+
+        DEPRECATED: Use solve_async() for WebSocket streaming with backpressure
+        """
         t = 0.0
         step = 0
         last_save = 0.0
-        
+
         logger.info(f"Starting simulation: t_end={self.t_end}s, dt={self.dt}s")
-        
+
         while t < self.t_end:
             # Update concentration
             self.update_concentration()
-            
+
             # Update potential (simplified - linear distribution)
             self.update_potential()
-            
+
             # Compute current density at electrode
             j = self.compute_current_density()
-            
+
             # Save output at specified intervals
             if t - last_save >= self.save_interval:
                 yield {
@@ -100,13 +107,13 @@ class SimpleElectrochemistrySolver:
                     "x": self.x.tolist()
                 }
                 last_save = t
-                
+
                 if step % 100 == 0:
                     logger.info(f"t={t:.3f}s, j={j:.3e} A/m², c_surf={self.c[0]:.3e} mol/m³")
-            
+
             t += self.dt
             step += 1
-        
+
         # Final frame
         j = self.compute_current_density()
         yield {
@@ -117,8 +124,123 @@ class SimpleElectrochemistrySolver:
             "potential": self.phi.tolist(),
             "x": self.x.tolist()
         }
-        
+
         logger.info(f"Simulation completed: {step} timesteps")
+
+    async def solve_async(
+        self,
+        keyframe_interval: int = 10
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Async time-stepping loop with keyframe support for WebSocket streaming
+
+        Args:
+            keyframe_interval: Mark every Nth frame as keyframe (default: 10)
+
+        Yields:
+            Frame dictionaries with simulation data and keyframe flags
+
+        Keyframe Strategy (Solarpunk Efficiency):
+            - Every 10th frame is marked as keyframe (critical data)
+            - Non-keyframes can be dropped by backpressure controller
+            - Keyframes always preserve full state (concentration, potential)
+            - Final frame is always a keyframe
+
+        Example:
+            solver = SimpleElectrochemistrySolver(scenario)
+            async for frame in solver.solve_async():
+                if frame["is_keyframe"]:
+                    print(f"Keyframe at t={frame['time']}")
+                await backpressure_controller.enqueue(frame, is_keyframe=frame["is_keyframe"])
+        """
+        t = 0.0
+        step = 0
+        save_step = 0  # Track which save step we're on
+        last_save = 0.0
+
+        logger.info(
+            f"Starting async simulation: t_end={self.t_end}s, dt={self.dt}s, "
+            f"keyframe_interval={keyframe_interval}"
+        )
+
+        while t < self.t_end:
+            # Update concentration
+            self.update_concentration()
+
+            # Update potential (simplified - linear distribution)
+            self.update_potential()
+
+            # Compute current density at electrode
+            j = self.compute_current_density()
+
+            # Save output at specified intervals
+            if t - last_save >= self.save_interval:
+                # Determine if this is a keyframe (every 10th save by default)
+                is_keyframe = (save_step % keyframe_interval == 0)
+
+                frame = {
+                    "type": "frame",
+                    "time": t,
+                    "timestep": step,
+                    "save_step": save_step,
+                    "is_keyframe": is_keyframe,
+                    "data": {
+                        "current_density": float(j),
+                        "voltage": float(self.V_applied),
+                        "concentration_surface": float(self.c[0]),
+                        "concentration_bulk": float(self.c[-1]),
+                    }
+                }
+
+                # Include full arrays only in keyframes (reduce bandwidth)
+                if is_keyframe:
+                    frame["data"]["concentration"] = self.c.tolist()
+                    frame["data"]["potential"] = self.phi.tolist()
+                    frame["data"]["x"] = self.x.tolist()
+
+                yield frame
+
+                last_save = t
+                save_step += 1
+
+                if step % 100 == 0:
+                    logger.info(
+                        f"t={t:.3f}s, j={j:.3e} A/m², c_surf={self.c[0]:.3e} mol/m³ "
+                        f"[{'KEYFRAME' if is_keyframe else 'frame'}]"
+                    )
+
+            t += self.dt
+            step += 1
+
+            # Yield control to event loop (allow other tasks to run)
+            await asyncio.sleep(0)
+
+        # Final frame (always a keyframe)
+        j = self.compute_current_density()
+        final_frame = {
+            "type": "frame",
+            "time": t,
+            "timestep": step,
+            "save_step": save_step,
+            "is_keyframe": True,  # Final frame is always critical
+            "final": True,
+            "data": {
+                "current_density": float(j),
+                "voltage": float(self.V_applied),
+                "concentration_surface": float(self.c[0]),
+                "concentration_bulk": float(self.c[-1]),
+                "concentration": self.c.tolist(),
+                "potential": self.phi.tolist(),
+                "x": self.x.tolist()
+            }
+        }
+
+        yield final_frame
+
+        logger.info(
+            f"Simulation completed: {step} timesteps, {save_step} frames saved, "
+            f"{(save_step // keyframe_interval) + 1} keyframes"
+        )
     
     def update_concentration(self):
         """Update concentration using implicit finite differences"""
