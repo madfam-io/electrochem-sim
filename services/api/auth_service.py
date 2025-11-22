@@ -216,6 +216,65 @@ async def get_current_active_user(
         )
     return current_user
 
+async def get_current_user_from_token(token: str, db: Session) -> User:
+    """
+    Get user from JWT token string (for WebSocket authentication)
+
+    Args:
+        token: JWT access token
+        db: Database session
+
+    Returns:
+        User object
+
+    Raises:
+        HTTPException: If token is invalid or user not found
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials"
+    )
+
+    try:
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret_key,
+            algorithms=[settings.jwt_algorithm]
+        )
+
+        # Verify token type
+        if payload.get("type") != "access":
+            raise credentials_exception
+
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+
+    except JWTError as e:
+        logger.warning(f"JWT validation failed: {e}")
+        raise credentials_exception
+
+    # Get user from database
+    db_user = AuthService.get_user_by_id(db, user_id)
+    if db_user is None:
+        raise credentials_exception
+
+    if not db_user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Inactive user"
+        )
+
+    return User(
+        id=db_user.id,
+        username=db_user.username,
+        email=db_user.email,
+        full_name=db_user.full_name,
+        role=db_user.role,
+        is_active=db_user.is_active,
+        is_superuser=db_user.is_superuser
+    )
+
 class RoleChecker:
     """Check if user has required role"""
     def __init__(self, allowed_roles: list):

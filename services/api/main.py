@@ -36,6 +36,7 @@ from services.api.exceptions import (
 from services.api.logging_config import setup_logging, get_logger
 from services.api.database import get_db, init_db, Run as RunModel, Scenario as ScenarioModel, User as UserModel
 from services.api.metrics import setup_metrics, record_run_created, record_auth_attempt
+from services.api.routers import websocket_router
 
 # Configure logging
 setup_logging()
@@ -92,6 +93,9 @@ async def metrics():
 
 # Register exception handlers
 register_exception_handlers(app)
+
+# Include WebSocket router
+app.include_router(websocket_router)
 
 # ============= Authentication Endpoints =============
 
