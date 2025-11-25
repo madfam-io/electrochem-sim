@@ -1,0 +1,123 @@
+# =============================================================================
+# GALVANA (electrochem-sim) - Docker Compose Configuration
+# =============================================================================
+# Electrochemical Simulation Platform
+# Integrates with MADFAM shared infrastructure
+# =============================================================================
+
+name: galvana
+
+services:
+  # FastAPI Backend
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: galvana-api
+    ports:
+      - '8700:8000'
+    volumes:
+      - ./services:/app/services
+      - ./apps:/app/apps
+      - ./workers:/app/workers
+    environment:
+      - ENV=development
+      - DEBUG=true
+      # Shared PostgreSQL
+      - DATABASE_URL=postgresql://madfam:madfam_dev_password@madfam-postgres-shared:5432/galvana_db
+      # Shared Redis
+      - REDIS_URL=redis://:redis_dev_password@madfam-redis-shared:6379/7
+      # Shared MinIO
+      - MINIO_ENDPOINT=madfam-minio-shared:9000
+      - MINIO_ACCESS_KEY=madfam_minio_admin
+      - MINIO_SECRET_KEY=minio_dev_password
+      - MINIO_BUCKET=galvana-simulations
+      # Janua Auth Integration
+      - JANUA_ENABLED=true
+      - JANUA_JWT_SECRET=dev-shared-janua-secret-32chars!!
+      - JANUA_API_URL=http://janua-api:8001
+      - JANUA_VERIFY_SSL=false
+      # App Config
+      - LOG_LEVEL=INFO
+      - CORS_ORIGINS=http://localhost:3050,http://localhost:8700
+    networks:
+      - madfam-shared-network
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8000/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    command: uvicorn services.api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # React Frontend (Visualization)
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: galvana-web
+    ports:
+      - '3050:3000'
+    volumes:
+      - ./apps/web:/app/apps/web
+      - /app/node_modules
+      - /app/apps/web/node_modules
+    environment:
+      - NODE_ENV=development
+      - VITE_API_BASE_URL=http://localhost:8700
+      - VITE_WS_URL=ws://localhost:8700/ws
+      # Janua Auth (frontend)
+      - VITE_JANUA_ENABLED=true
+      - VITE_JANUA_URL=http://localhost:8001
+    networks:
+      - madfam-shared-network
+    depends_on:
+      - api
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3000']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Celery Worker for Simulation Jobs
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: galvana-worker
+    volumes:
+      - ./workers:/app/workers
+      - ./services:/app/services
+    environment:
+      - ENV=development
+      - DATABASE_URL=postgresql://madfam:madfam_dev_password@madfam-postgres-shared:5432/galvana_db
+      - REDIS_URL=redis://:redis_dev_password@madfam-redis-shared:6379/7
+      - MINIO_ENDPOINT=madfam-minio-shared:9000
+      - MINIO_ACCESS_KEY=madfam_minio_admin
+      - MINIO_SECRET_KEY=minio_dev_password
+      - CELERY_BROKER_URL=redis://:redis_dev_password@madfam-redis-shared:6379/7
+      - CELERY_RESULT_BACKEND=redis://:redis_dev_password@madfam-redis-shared:6379/7
+    networks:
+      - madfam-shared-network
+    depends_on:
+      - api
+    command: celery -A workers.celery_app worker --loglevel=info --concurrency=2
+
+# =============================================================================
+# SHARED INFRASTRUCTURE NOTE:
+# =============================================================================
+# This configuration uses the shared PostgreSQL, Redis, and MinIO from:
+#   ~/labspace/solarpunk-foundry/ops/local/docker-compose.shared.yml
+#
+# Database: madfam-postgres-shared:5432/galvana_db
+# Redis: madfam-redis-shared:6379/7
+# MinIO: madfam-minio-shared:9000
+#
+# Start shared infrastructure first:
+#   cd ~/labspace/solarpunk-foundry/ops/bin && ./madfam.sh start
+# =============================================================================
+
+networks:
+  madfam-shared-network:
+    external: true
