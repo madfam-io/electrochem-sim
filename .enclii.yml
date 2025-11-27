@@ -1,0 +1,145 @@
+# Galvana (Electrochem-Sim) - Enclii Deployment Configuration
+# Phygital electrochemistry platform (simulation + instrument control)
+
+apiVersion: enclii.dev/v1
+kind: Service
+metadata:
+  name: galvana
+  project: aureo-labs
+  description: Electrochemistry simulation and instrument control platform
+
+spec:
+  # API Service
+  services:
+    - name: galvana-api
+      build:
+        type: dockerfile
+        dockerfile: Dockerfile.api
+        context: .
+        source:
+          git:
+            repository: https://github.com/madfam-io/electrochem-sim
+            branch: main
+            autoDeploy: true
+
+      runtime:
+        port: 4600
+        replicas: 2
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2000m"
+            memory: "4Gi"
+
+        healthCheck: /api/health
+        readinessProbe:
+          path: /api/health
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        livenessProbe:
+          path: /api/health
+          initialDelaySeconds: 60
+          periodSeconds: 15
+
+      env:
+        - name: PYTHON_ENV
+          value: production
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: galvana-secrets
+              key: database-url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: galvana-secrets
+              key: redis-url
+        - name: S3_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: galvana-secrets
+              key: s3-endpoint
+        - name: S3_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: galvana-secrets
+              key: s3-access-key
+        - name: S3_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: galvana-secrets
+              key: s3-secret-key
+
+      routes:
+        - host: api.galvana.io
+          path: /
+          tls: true
+
+    # Web Frontend
+    - name: galvana-web
+      build:
+        type: dockerfile
+        dockerfile: Dockerfile.web
+        context: .
+
+      runtime:
+        port: 3000
+        replicas: 2
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+
+        healthCheck: /api/health
+
+      env:
+        - name: NODE_ENV
+          value: production
+        - name: NEXT_PUBLIC_API_URL
+          value: https://api.galvana.io
+
+      routes:
+        - host: galvana.io
+          path: /
+          tls: true
+        - host: www.galvana.io
+          path: /
+          tls: true
+          redirect: galvana.io
+
+  # Simulation Worker (compute-intensive)
+  workers:
+    - name: galvana-sim-worker
+      build:
+        type: dockerfile
+        dockerfile: Dockerfile.worker
+        context: .
+
+      runtime:
+        replicas: 1
+        resources:
+          requests:
+            cpu: "1000m"
+            memory: "2Gi"
+          limits:
+            cpu: "4000m"
+            memory: "8Gi"
+
+      env:
+        - name: WORKER_TYPE
+          value: simulation
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: galvana-secrets
+              key: redis-url
+
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 60
