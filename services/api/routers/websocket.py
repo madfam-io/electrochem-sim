@@ -13,62 +13,90 @@ Features:
 
 import asyncio
 import json
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query
-from fastapi.websockets import WebSocketState
-from typing import Dict, Optional, Set
-from datetime import datetime
-from sqlalchemy.orm import Session
 import logging
-import redis.asyncio as aioredis
+from datetime import datetime
+from typing import Dict, Optional, Set
 
-from services.api.database import get_db, Run as RunModel
-from services.api.models import RunStatus, User
+import redis.asyncio as aioredis
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.websockets import WebSocketState
+from prometheus_client import REGISTRY, Counter, Gauge
+from sqlalchemy.orm import Session
+
 from services.api.auth_service import get_current_user_from_token
-from services.api.utils.backpressure import BackpressureController, backpressure_monitor
-from services.api.exceptions import ResourceNotFoundException
 from services.api.config import settings
-from prometheus_client import Counter, Gauge
+from services.api.database import Run as RunModel
+from services.api.database import get_db
+from services.api.exceptions import ResourceNotFoundException
+from services.api.models import RunStatus, User
+from services.api.utils.backpressure import BackpressureController, backpressure_monitor
 
 logger = logging.getLogger(__name__)
 
 # Create router
 router = APIRouter(prefix="/ws", tags=["websocket"])
 
+
+def get_or_create_counter(name: str, description: str, labelnames: list) -> Counter:
+    """Get existing counter or create new one to avoid duplicate registration."""
+    try:
+        return Counter(name, description, labelnames)
+    except ValueError:
+        # Metric already exists, retrieve it from registry
+        return REGISTRY._names_to_collectors.get(name)
+
+
+def get_or_create_gauge(name: str, description: str, labelnames: list) -> Gauge:
+    """Get existing gauge or create new one to avoid duplicate registration."""
+    try:
+        return Gauge(name, description, labelnames)
+    except ValueError:
+        # Metric already exists, retrieve it from registry
+        return REGISTRY._names_to_collectors.get(name)
+
+
 # Prometheus metrics
-websocket_connections_total = Counter(
+websocket_connections_total = get_or_create_counter(
     "galvana_websocket_connections_total",
     "Total WebSocket connection attempts",
-    ["status"]  # success, auth_failed, limit_exceeded, error
+    ["status"],  # success, auth_failed, limit_exceeded, error
 )
 
-websocket_connections_active = Gauge(
+websocket_connections_active = get_or_create_gauge(
     "galvana_websocket_connections_active",
     "Current number of active WebSocket connections",
-    ["user_id"]
+    ["user_id"],
 )
 
-websocket_messages_total = Counter(
+websocket_messages_total = get_or_create_counter(
     "galvana_websocket_messages_total",
     "Total WebSocket messages sent",
-    ["run_id", "type"]  # status, frame, log, event
+    ["run_id", "type"],  # status, frame, log, event
 )
 
-websocket_disconnections_total = Counter(
+websocket_disconnections_total = get_or_create_counter(
     "galvana_websocket_disconnections_total",
     "Total WebSocket disconnections",
-    ["reason"]  # client_disconnect, error, server_close
+    ["reason"],  # client_disconnect, error, server_close
 )
 
-redis_messages_received_total = Counter(
+redis_messages_received_total = get_or_create_counter(
     "galvana_redis_messages_received_total",
     "Total messages received from Redis telemetry channels",
-    ["run_id"]
+    ["run_id"],
 )
 
-redis_subscribe_errors_total = Counter(
+redis_subscribe_errors_total = get_or_create_counter(
     "galvana_redis_subscribe_errors_total",
     "Total Redis subscription errors",
-    ["run_id"]
+    ["run_id"],
 )
 
 
@@ -112,10 +140,7 @@ class ConnectionManager:
         return count < self.max_connections_per_user
 
     async def connect(
-        self,
-        websocket: WebSocket,
-        run_id: str,
-        user_id: str
+        self, websocket: WebSocket, run_id: str, user_id: str
     ) -> BackpressureController:
         """
         Accept WebSocket connection and create backpressure controller
@@ -140,7 +165,7 @@ class ConnectionManager:
             )
             raise HTTPException(
                 status_code=429,
-                detail=f"Connection limit exceeded (max {self.max_connections_per_user} per user)"
+                detail=f"Connection limit exceeded (max {self.max_connections_per_user} per user)",
             )
 
         # Accept connection
@@ -173,14 +198,14 @@ class ConnectionManager:
         )
 
         # Start Redis subscriber task
-        redis_task = asyncio.create_task(
-            self.subscribe_to_redis(run_id, controller)
-        )
+        redis_task = asyncio.create_task(self.subscribe_to_redis(run_id, controller))
         self.redis_tasks[run_id] = redis_task
 
         return controller
 
-    async def disconnect(self, run_id: str, user_id: str, reason: str = "client_disconnect"):
+    async def disconnect(
+        self, run_id: str, user_id: str, reason: str = "client_disconnect"
+    ):
         """
         Disconnect WebSocket and cleanup resources
 
@@ -227,10 +252,7 @@ class ConnectionManager:
         )
 
     async def send_message(
-        self,
-        run_id: str,
-        message: Dict,
-        message_type: str = "frame"
+        self, run_id: str, message: Dict, message_type: str = "frame"
     ):
         """
         Send message to WebSocket client
@@ -256,11 +278,7 @@ class ConnectionManager:
         except Exception as e:
             logger.error(f"Failed to send message to run {run_id}: {e}")
 
-    async def subscribe_to_redis(
-        self,
-        run_id: str,
-        controller: BackpressureController
-    ):
+    async def subscribe_to_redis(self, run_id: str, controller: BackpressureController):
         """
         Subscribe to Redis telemetry channel and forward messages to WebSocket
 
@@ -283,9 +301,7 @@ class ConnectionManager:
         try:
             # Create Redis client
             redis_client = await aioredis.from_url(
-                settings.redis_url,
-                encoding="utf-8",
-                decode_responses=True
+                settings.redis_url, encoding="utf-8", decode_responses=True
             )
 
             # Create pub/sub connection
@@ -308,7 +324,9 @@ class ConnectionManager:
                         is_keyframe = frame_data.get("is_keyframe", False)
 
                         # Enqueue with backpressure control
-                        enqueued = await controller.enqueue(frame_data, is_keyframe=is_keyframe)
+                        enqueued = await controller.enqueue(
+                            frame_data, is_keyframe=is_keyframe
+                        )
 
                         if enqueued:
                             redis_messages_received_total.labels(run_id=run_id).inc()
@@ -322,7 +340,9 @@ class ConnectionManager:
                         logger.error(f"Invalid JSON from Redis channel {channel}: {e}")
                         redis_subscribe_errors_total.labels(run_id=run_id).inc()
                     except Exception as e:
-                        logger.error(f"Error processing Redis message for run {run_id}: {e}")
+                        logger.error(
+                            f"Error processing Redis message for run {run_id}: {e}"
+                        )
                         redis_subscribe_errors_total.labels(run_id=run_id).inc()
 
         except asyncio.CancelledError:
@@ -334,12 +354,15 @@ class ConnectionManager:
             redis_subscribe_errors_total.labels(run_id=run_id).inc()
 
             # Send error to client
-            await controller.enqueue({
-                "type": "event",
-                "event": "redis_error",
-                "message": "Lost connection to telemetry stream",
-                "error": str(e)
-            }, is_keyframe=True)
+            await controller.enqueue(
+                {
+                    "type": "event",
+                    "event": "redis_error",
+                    "message": "Lost connection to telemetry stream",
+                    "error": str(e),
+                },
+                is_keyframe=True,
+            )
 
         finally:
             # Cleanup
@@ -365,7 +388,7 @@ connection_manager = ConnectionManager(max_connections_per_user=3)
 
 async def get_current_user_ws(
     token: str = Query(..., description="JWT access token"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ) -> User:
     """
     Authenticate WebSocket connection via query parameter
@@ -390,10 +413,7 @@ async def get_current_user_ws(
     except Exception as e:
         logger.warning(f"WebSocket authentication failed: {e}")
         websocket_connections_total.labels(status="auth_failed").inc()
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired token"
-        )
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
 @router.websocket("/runs/{run_id}")
@@ -401,7 +421,7 @@ async def websocket_endpoint(
     websocket: WebSocket,
     run_id: str,
     current_user: User = Depends(get_current_user_ws),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     WebSocket endpoint for real-time simulation streaming
@@ -434,10 +454,15 @@ async def websocket_endpoint(
 
     try:
         # Verify run exists and user has access
-        run = db.query(RunModel).filter(
-            RunModel.id == run_id,
-            (RunModel.user_id == current_user.id) | (current_user.is_superuser == True)
-        ).first()
+        run = (
+            db.query(RunModel)
+            .filter(
+                RunModel.id == run_id,
+                (RunModel.user_id == current_user.id)
+                | (current_user.is_superuser == True),
+            )
+            .first()
+        )
 
         if not run:
             websocket_connections_total.labels(status="error").inc()
@@ -446,25 +471,25 @@ async def websocket_endpoint(
 
         # Connect and create backpressure controller
         controller = await connection_manager.connect(
-            websocket=websocket,
-            run_id=run_id,
-            user_id=current_user.id
+            websocket=websocket, run_id=run_id, user_id=current_user.id
         )
 
         # Send connection confirmation
-        await websocket.send_json({
-            "type": "event",
-            "event": "connected",
-            "run_id": run_id,
-            "timestamp": datetime.utcnow().isoformat(),
-            "message": "WebSocket connection established (subscribed to Redis telemetry)",
-            "telemetry_channel": f"run:{run_id}:telemetry",
-            "backpressure": {
-                "max_queue_size": controller.max_queue_size,
-                "slow_threshold": controller.slow_threshold,
-                "frame_dropping_enabled": True
+        await websocket.send_json(
+            {
+                "type": "event",
+                "event": "connected",
+                "run_id": run_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "message": "WebSocket connection established (subscribed to Redis telemetry)",
+                "telemetry_channel": f"run:{run_id}:telemetry",
+                "backpressure": {
+                    "max_queue_size": controller.max_queue_size,
+                    "slow_threshold": controller.slow_threshold,
+                    "frame_dropping_enabled": True,
+                },
             }
-        })
+        )
 
         # Stream frames to client with backpressure control
         # Frames are populated by the Redis subscriber task (started in connect())
@@ -479,9 +504,7 @@ async def websocket_endpoint(
 
                 # Send frame
                 await connection_manager.send_message(
-                    run_id=run_id,
-                    message=frame,
-                    message_type=msg_type
+                    run_id=run_id, message=frame, message_type=msg_type
                 )
 
         except asyncio.CancelledError:
@@ -491,9 +514,7 @@ async def websocket_endpoint(
         logger.info(f"Client disconnected from run {run_id}")
         if controller:
             await connection_manager.disconnect(
-                run_id=run_id,
-                user_id=current_user.id,
-                reason="client_disconnect"
+                run_id=run_id, user_id=current_user.id, reason="client_disconnect"
             )
 
     except Exception as e:
@@ -502,19 +523,19 @@ async def websocket_endpoint(
 
         if controller:
             await connection_manager.disconnect(
-                run_id=run_id,
-                user_id=current_user.id,
-                reason="error"
+                run_id=run_id, user_id=current_user.id, reason="error"
             )
 
         # Try to send error message before closing
         try:
-            await websocket.send_json({
-                "type": "event",
-                "event": "error",
-                "message": "WebSocket error occurred",
-                "timestamp": datetime.utcnow().isoformat()
-            })
+            await websocket.send_json(
+                {
+                    "type": "event",
+                    "event": "error",
+                    "message": "WebSocket error occurred",
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            )
         except:
             pass
 

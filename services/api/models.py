@@ -33,7 +33,7 @@ class TransportModel(str, Enum):
 class CreateRunRequest(BaseModel):
     """Validated request for creating a run"""
     type: RunType = RunType.SIMULATION
-    scenario_id: Optional[str] = Field(None, regex="^scn_[a-zA-Z0-9]+$")
+    scenario_id: Optional[str] = Field(None, pattern="^scn_[a-zA-Z0-9]+$")
     scenario_yaml: Optional[str] = Field(None, max_length=50000)
     engine: SimulationEngine = SimulationEngine.AUTO
     tags: List[str] = Field(default_factory=list, max_items=20)
@@ -56,7 +56,7 @@ class CreateRunRequest(BaseModel):
 
 class UpdateRunRequest(BaseModel):
     """Validated request for updating a run"""
-    action: str = Field(..., regex="^(pause|resume|abort)$")
+    action: str = Field(..., pattern="^(pause|resume|abort)$")
     reason: Optional[str] = Field(None, max_length=500)
     
     @validator('reason')
@@ -69,7 +69,7 @@ class PhysicsConfig(BaseModel):
     """Physics configuration with validation"""
     transport: TransportModel = TransportModel.NERNST_PLANCK
     electroneutral: bool = True
-    potential_model: str = Field("poisson", regex="^(poisson|none|simplified)$")
+    potential_model: str = Field("poisson", pattern="^(poisson|none|simplified)$")
     heat_coupling: bool = False
     phase_field: bool = False
     
@@ -81,7 +81,7 @@ class PhysicsConfig(BaseModel):
 
 class GeometryConfig(BaseModel):
     """Geometry configuration with validation"""
-    type: str = Field(..., regex="^(1D|2D|3D)$")
+    type: str = Field(..., pattern="^(1D|2D|3D)$")
     length: float = Field(..., gt=0, le=1.0, description="Length in meters")
     width: Optional[float] = Field(None, gt=0, le=1.0)
     height: Optional[float] = Field(None, gt=0, le=1.0)
@@ -96,7 +96,7 @@ class GeometryConfig(BaseModel):
 
 class KineticsConfig(BaseModel):
     """Kinetics configuration with validation"""
-    model: str = Field("butler_volmer", regex="^(butler_volmer|marcus_hush|linear)$")
+    model: str = Field("butler_volmer", pattern="^(butler_volmer|marcus_hush|linear)$")
     exchange_current_density: float = Field(..., gt=0, le=1000)
     alpha_a: float = Field(0.5, ge=0, le=1)
     alpha_c: float = Field(0.5, ge=0, le=1)
@@ -145,7 +145,7 @@ class MaterialsConfig(BaseModel):
 
 class DriveConfig(BaseModel):
     """Drive configuration with validation"""
-    mode: str = Field(..., regex="^(potentiostatic|galvanostatic|potentiodynamic)$")
+    mode: str = Field(..., pattern="^(potentiostatic|galvanostatic|potentiodynamic)$")
     waveform: Dict[str, Any]
     
     @validator('waveform')
@@ -169,12 +169,12 @@ class DriveConfig(BaseModel):
 
 class NumericsConfig(BaseModel):
     """Numerics configuration with validation"""
-    time_integrator: str = Field("BDF", regex="^(BDF|SDIRK|implicit_euler|explicit_euler)$")
+    time_integrator: str = Field("BDF", pattern="^(BDF|SDIRK|implicit_euler|explicit_euler)$")
     dt_initial: float = Field(1e-3, gt=1e-10, le=1)
     dt_max: float = Field(0.1, gt=1e-10, le=10)
     tolerance: float = Field(1e-6, gt=1e-12, le=1e-2)
     newton_tol: Optional[float] = Field(1e-8, gt=1e-12, le=1e-4)
-    linear_solver: Optional[str] = Field("gmres", regex="^(gmres|bicgstab|direct)$")
+    linear_solver: Optional[str] = Field("gmres", pattern="^(gmres|bicgstab|direct)$")
     
     @validator('dt_max')
     def validate_dt(cls, v, values):
@@ -187,7 +187,7 @@ class OutputsConfig(BaseModel):
     """Outputs configuration with validation"""
     save: List[str] = Field(..., min_items=1, max_items=20)
     cadence: float = Field(0.1, gt=0, le=10)
-    format: str = Field("json", regex="^(json|hdf5|netcdf|csv|zarr)$")
+    format: str = Field("json", pattern="^(json|hdf5|netcdf|csv|zarr)$")
     
     @validator('save')
     def validate_outputs(cls, v):
@@ -205,7 +205,7 @@ class OutputsConfig(BaseModel):
 class ScenarioCreate(BaseModel):
     """Create scenario with full validation"""
     name: str = Field(..., min_length=1, max_length=200)
-    version: str = Field("0.1", regex=r"^\d+\.\d+(\.\d+)?$")
+    version: str = Field("0.1", pattern=r"^\d+\.\d+(\.\d+)?$")
     description: Optional[str] = Field(None, max_length=1000)
     physics: PhysicsConfig
     geometry: GeometryConfig
@@ -254,11 +254,11 @@ class User(BaseModel):
 
 class UserCreate(BaseModel):
     """User creation model"""
-    username: str = Field(..., min_length=3, max_length=50, regex="^[a-zA-Z0-9_-]+$")
+    username: str = Field(..., min_length=3, max_length=50, pattern="^[a-zA-Z0-9_-]+$")
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=100)
     full_name: Optional[str] = Field(None, max_length=255)
-    role: Optional[str] = Field("user", regex="^(user|researcher|admin|superuser)$")
+    role: Optional[str] = Field("user", pattern="^(user|researcher|admin|superuser)$")
     is_superuser: Optional[bool] = False
     
     @validator('password')
@@ -278,7 +278,7 @@ class UserUpdate(BaseModel):
     """User update model"""
     full_name: Optional[str] = Field(None, max_length=255)
     email: Optional[EmailStr]
-    role: Optional[str] = Field(None, regex="^(user|researcher|admin|superuser)$")
+    role: Optional[str] = Field(None, pattern="^(user|researcher|admin|superuser)$")
     is_active: Optional[bool]
 
 class PasswordChange(BaseModel):

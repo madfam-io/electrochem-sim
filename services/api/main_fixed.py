@@ -2,57 +2,78 @@
 Galvana API with complete security fixes
 """
 
+import asyncio
+import logging
+import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, status
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-import asyncio
-import uuid
-import logging
+
+from services.api.auth_service import (
+    AuthService,
+    create_access_token,
+    create_refresh_token,
+    get_current_active_user,
+    require_admin,
+    require_user,
+)
 
 # Import local modules
 from services.api.config import settings
-from services.api.models import (
-    RunStatus, RunType, SimulationEngine,
-    CreateRunRequest, UpdateRunRequest,
-    RunResponse, ScenarioCreate,
-    User, UserCreate, UserUpdate, PasswordChange, Token
-)
-from services.api.auth_service import (
-    AuthService, get_current_active_user, require_user, require_admin,
-    create_access_token, create_refresh_token
-)
-from services.api.middleware import setup_middleware, create_rate_limit
+from services.api.database import Run as RunModel
+from services.api.database import Scenario as ScenarioModel
+from services.api.database import get_db, init_db
 from services.api.exceptions import (
-    register_exception_handlers,
     ResourceNotFoundException,
     SimulationException,
-    ValidationException
+    ValidationException,
+    register_exception_handlers,
 )
-from services.api.logging_config import setup_logging, get_logger
-from services.api.database import get_db, init_db, Run as RunModel, Scenario as ScenarioModel
+from services.api.logging_config import get_logger, setup_logging
+from services.api.middleware import create_rate_limit, setup_middleware
+from services.api.models import (
+    CreateRunRequest,
+    PasswordChange,
+    RunResponse,
+    RunStatus,
+    RunType,
+    ScenarioCreate,
+    SimulationEngine,
+    Token,
+    UpdateRunRequest,
+    User,
+    UserCreate,
+    UserUpdate,
+)
 
 # Configure logging
 setup_logging()
 logger = get_logger(__name__)
 
+
 # Models for API responses
 class RunHandle(BaseModel):
     """Simplified response for run creation"""
+
     run_id: str
     status: RunStatus
     queue_position: Optional[int] = None
     stream_url: Optional[str] = None
 
+
 class HealthCheck(BaseModel):
     """Health check response"""
+
     status: str = "healthy"
     timestamp: datetime
     services: Dict[str, str]
+
 
 # Lifespan management
 @asynccontextmanager
@@ -64,6 +85,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(process_run_queue())
     yield
     logger.info("Shutting down Galvana API...")
+
 
 # Create FastAPI app
 app = FastAPI(
@@ -83,12 +105,12 @@ register_exception_handlers(app)
 
 # ============= Authentication Endpoints =============
 
-@app.post("/api/v1/auth/register", response_model=User, status_code=status.HTTP_201_CREATED)
+
+@app.post(
+    "/api/v1/auth/register", response_model=User, status_code=status.HTTP_201_CREATED
+)
 @create_rate_limit("3/hour")  # Strict rate limit for registration
-async def register(
-    user_create: UserCreate,
-    db: Session = Depends(get_db)
-):
+async def register(user_create: UserCreate, db: Session = Depends(get_db)):
     """Register new user account"""
     try:
         db_user = AuthService.create_user(db, user_create)
@@ -99,20 +121,17 @@ async def register(
             full_name=db_user.full_name,
             role=db_user.role,
             is_active=db_user.is_active,
-            is_superuser=db_user.is_superuser
+            is_superuser=db_user.is_superuser,
         )
     except Exception as e:
         logger.error(f"Registration failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
 
 @app.post("/api/v1/auth/token", response_model=Token)
 @create_rate_limit("5/minute")  # Rate limit login attempts
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db)
+    form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)
 ):
     """Authenticate and receive access token"""
     user = AuthService.authenticate_user(db, form_data.username, form_data.password)
@@ -124,55 +143,60 @@ async def login(
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # Create tokens
     access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
     access_token = create_access_token(
-        data={"sub": user.id}, 
-        expires_delta=access_token_expires
+        data={"sub": user.id}, expires_delta=access_token_expires
     )
     refresh_token = create_refresh_token(data={"sub": user.id})
-    
+
     return Token(
         access_token=access_token,
         refresh_token=refresh_token,
         token_type="bearer",
-        expires_in=settings.access_token_expire_minutes * 60
+        expires_in=settings.access_token_expire_minutes * 60,
     )
 
+
 @app.get("/api/v1/auth/me", response_model=User)
-async def get_current_user_info(
-    current_user: User = Depends(get_current_active_user)
-):
+async def get_current_user_info(current_user: User = Depends(get_current_active_user)):
     """Get current user information"""
     return current_user
+
 
 @app.put("/api/v1/auth/password")
 async def change_password(
     password_change: PasswordChange,
     current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """Change user password"""
     # Verify current password
-    user = AuthService.authenticate_user(db, current_user.username, password_change.current_password)
+    user = AuthService.authenticate_user(
+        db, current_user.username, password_change.current_password
+    )
     if not user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current password is incorrect"
+            detail="Current password is incorrect",
         )
-    
+
     # Update password
-    success = AuthService.update_password(db, current_user.id, password_change.new_password)
+    success = AuthService.update_password(
+        db, current_user.id, password_change.new_password
+    )
     if not success:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update password"
+            detail="Failed to update password",
         )
-    
+
     return {"message": "Password updated successfully"}
 
+
 # ============= Health Check =============
+
 
 @app.get("/health", response_model=HealthCheck)
 async def health_check():
@@ -183,10 +207,12 @@ async def health_check():
             "api": "healthy",
             "database": "healthy",
             "redis": "healthy",
-        }
+        },
     )
 
+
 # ============= Run Management (All Protected) =============
+
 
 @app.post("/api/v1/runs", response_model=RunHandle, status_code=202)
 @create_rate_limit("10/minute")
@@ -194,17 +220,19 @@ async def create_run(
     request: CreateRunRequest,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """Create and queue a new simulation run"""
     # Validate scenario exists if ID provided
     if request.scenario_id:
-        scenario = db.query(ScenarioModel).filter(
-            ScenarioModel.id == request.scenario_id
-        ).first()
+        scenario = (
+            db.query(ScenarioModel)
+            .filter(ScenarioModel.id == request.scenario_id)
+            .first()
+        )
         if not scenario:
             raise ResourceNotFoundException("Scenario", request.scenario_id)
-    
+
     # Create run in database
     run = RunModel(
         type=request.type.value,
@@ -213,22 +241,23 @@ async def create_run(
         user_id=current_user.id,
         engine=request.engine.value,
         tags=request.tags,
-        metadata=request.metadata
+        run_metadata=request.metadata,
     )
-    
+
     db.add(run)
     db.commit()
     db.refresh(run)
-    
+
     # Queue for processing
     background_tasks.add_task(queue_run_for_processing, run.id)
-    
+
     return RunHandle(
         run_id=run.id,
         status=RunStatus.QUEUED,
         queue_position=get_queue_position(run.id, db),
-        stream_url=f"/api/v1/runs/{run.id}/stream"
+        stream_url=f"/api/v1/runs/{run.id}/stream",
     )
+
 
 @app.get("/api/v1/runs", response_model=List[RunResponse])
 async def list_runs(
@@ -236,51 +265,59 @@ async def list_runs(
     limit: int = Field(20, le=100),
     offset: int = 0,
     current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """List user's runs with optional filtering"""
     query = db.query(RunModel).filter(RunModel.user_id == current_user.id)
-    
+
     if status:
         query = query.filter(RunModel.status == status.value)
-    
+
     # Admin can see all runs
     if current_user.is_superuser:
         query = db.query(RunModel)
         if status:
             query = query.filter(RunModel.status == status.value)
-    
+
     runs = query.order_by(RunModel.created_at.desc()).limit(limit).offset(offset).all()
-    
-    return [RunResponse(
-        id=run.id,
-        type=RunType(run.type),
-        status=RunStatus(run.status),
-        scenario_id=run.scenario_id,
-        engine=run.engine,
-        created_at=run.created_at,
-        started_at=run.started_at,
-        completed_at=run.completed_at,
-        progress=run.progress,
-        error=run.error,
-        tags=run.tags or []
-    ) for run in runs]
+
+    return [
+        RunResponse(
+            id=run.id,
+            type=RunType(run.type),
+            status=RunStatus(run.status),
+            scenario_id=run.scenario_id,
+            engine=run.engine,
+            created_at=run.created_at,
+            started_at=run.started_at,
+            completed_at=run.completed_at,
+            progress=run.progress,
+            error=run.error,
+            tags=run.tags or [],
+        )
+        for run in runs
+    ]
+
 
 @app.get("/api/v1/runs/{run_id}", response_model=RunResponse)
 async def get_run(
     run_id: str,
     current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """Get run details"""
-    run = db.query(RunModel).filter(
-        RunModel.id == run_id,
-        (RunModel.user_id == current_user.id) | (current_user.is_superuser == True)
-    ).first()
-    
+    run = (
+        db.query(RunModel)
+        .filter(
+            RunModel.id == run_id,
+            (RunModel.user_id == current_user.id) | (current_user.is_superuser == True),
+        )
+        .first()
+    )
+
     if not run:
         raise ResourceNotFoundException("Run", run_id)
-    
+
     return RunResponse(
         id=run.id,
         type=RunType(run.type),
@@ -292,27 +329,32 @@ async def get_run(
         completed_at=run.completed_at,
         progress=run.progress,
         error=run.error,
-        tags=run.tags or []
+        tags=run.tags or [],
     )
+
 
 @app.patch("/api/v1/runs/{run_id}")
 async def update_run(
     run_id: str,
     update: UpdateRunRequest,
     current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """Update run status (pause/resume/abort)"""
-    run = db.query(RunModel).filter(
-        RunModel.id == run_id,
-        (RunModel.user_id == current_user.id) | (current_user.is_superuser == True)
-    ).first()
-    
+    run = (
+        db.query(RunModel)
+        .filter(
+            RunModel.id == run_id,
+            (RunModel.user_id == current_user.id) | (current_user.is_superuser == True),
+        )
+        .first()
+    )
+
     if not run:
         raise ResourceNotFoundException("Run", run_id)
-    
+
     current_status = RunStatus(run.status)
-    
+
     if update.action == "pause" and current_status == RunStatus.RUNNING:
         run.status = RunStatus.PAUSED.value
     elif update.action == "resume" and current_status == RunStatus.PAUSED:
@@ -325,19 +367,21 @@ async def update_run(
     else:
         raise ValidationException(
             f"Invalid action {update.action} for status {current_status}",
-            field="action"
+            field="action",
         )
-    
+
     db.commit()
     return {"message": f"Run {run_id} updated successfully"}
 
+
 # ============= Scenario Management (All Protected) =============
+
 
 @app.post("/api/v1/scenarios", response_model=Dict[str, str], status_code=201)
 async def create_scenario(
     scenario_data: ScenarioCreate,  # Now using validated Pydantic model
     current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """Create or update a scenario"""
     scenario = ScenarioModel(
@@ -349,21 +393,24 @@ async def create_scenario(
         geometry=scenario_data.geometry.dict(),
         materials=scenario_data.materials.dict(),
         boundaries=scenario_data.boundaries,
-        kinetics=scenario_data.kinetics.dict() if hasattr(scenario_data, 'kinetics') else None,
+        kinetics=scenario_data.kinetics.dict()
+        if hasattr(scenario_data, "kinetics")
+        else None,
         drive=scenario_data.drive.dict(),
         numerics=scenario_data.numerics.dict(),
         outputs=scenario_data.outputs.dict(),
-        tags=scenario_data.tags
+        tags=scenario_data.tags,
     )
-    
+
     db.add(scenario)
     db.commit()
     db.refresh(scenario)
-    
+
     return {
         "id": scenario.id,
-        "message": f"Scenario '{scenario.name}' created successfully"
+        "message": f"Scenario '{scenario.name}' created successfully",
     }
+
 
 @app.get("/api/v1/scenarios", response_model=List[Dict[str, Any]])
 async def list_scenarios(
@@ -371,51 +418,64 @@ async def list_scenarios(
     offset: int = 0,
     public_only: bool = False,
     current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """List scenarios"""
     query = db.query(ScenarioModel)
-    
+
     if not current_user.is_superuser:
         if public_only:
             query = query.filter(ScenarioModel.is_public == True)
         else:
             query = query.filter(
-                (ScenarioModel.creator_id == current_user.id) | 
-                (ScenarioModel.is_public == True)
+                (ScenarioModel.creator_id == current_user.id)
+                | (ScenarioModel.is_public == True)
             )
-    
-    scenarios = query.order_by(ScenarioModel.created_at.desc()).limit(limit).offset(offset).all()
-    
-    return [{
-        "id": s.id,
-        "name": s.name,
-        "version": s.version,
-        "description": s.description,
-        "is_public": s.is_public,
-        "created_at": s.created_at.isoformat(),
-        "tags": s.tags or []
-    } for s in scenarios]
+
+    scenarios = (
+        query.order_by(ScenarioModel.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
+
+    return [
+        {
+            "id": s.id,
+            "name": s.name,
+            "version": s.version,
+            "description": s.description,
+            "is_public": s.is_public,
+            "created_at": s.created_at.isoformat(),
+            "tags": s.tags or [],
+        }
+        for s in scenarios
+    ]
+
 
 @app.get("/api/v1/scenarios/{scenario_id}")
 async def get_scenario(
     scenario_id: str,
     current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """Get scenario details"""
-    scenario = db.query(ScenarioModel).filter(
-        ScenarioModel.id == scenario_id,
-        (
-            (ScenarioModel.creator_id == current_user.id) | 
-            (ScenarioModel.is_public == True) |
-            (current_user.is_superuser == True)
+    scenario = (
+        db.query(ScenarioModel)
+        .filter(
+            ScenarioModel.id == scenario_id,
+            (
+                (ScenarioModel.creator_id == current_user.id)
+                | (ScenarioModel.is_public == True)
+                | (current_user.is_superuser == True)
+            ),
         )
-    ).first()
-    
+        .first()
+    )
+
     if not scenario:
         raise ResourceNotFoundException("Scenario", scenario_id)
-    
+
     return {
         "id": scenario.id,
         "name": scenario.name,
@@ -430,42 +490,48 @@ async def get_scenario(
         "numerics": scenario.numerics,
         "outputs": scenario.outputs,
         "tags": scenario.tags,
-        "created_at": scenario.created_at.isoformat()
+        "created_at": scenario.created_at.isoformat(),
     }
 
+
 # ============= Admin Endpoints =============
+
 
 @app.get("/api/v1/admin/users", response_model=List[User])
 async def list_users(
     limit: int = Field(50, le=200),
     offset: int = 0,
     current_user: User = Depends(require_admin),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """List all users (admin only)"""
     users = db.query(UserModel).limit(limit).offset(offset).all()
-    return [User(
-        id=u.id,
-        username=u.username,
-        email=u.email,
-        full_name=u.full_name,
-        role=u.role,
-        is_active=u.is_active,
-        is_superuser=u.is_superuser
-    ) for u in users]
+    return [
+        User(
+            id=u.id,
+            username=u.username,
+            email=u.email,
+            full_name=u.full_name,
+            role=u.role,
+            is_active=u.is_active,
+            is_superuser=u.is_superuser,
+        )
+        for u in users
+    ]
+
 
 @app.put("/api/v1/admin/users/{user_id}")
 async def update_user(
     user_id: str,
     user_update: UserUpdate,
     current_user: User = Depends(require_admin),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """Update user details (admin only)"""
     user = db.query(UserModel).filter(UserModel.id == user_id).first()
     if not user:
         raise ResourceNotFoundException("User", user_id)
-    
+
     # Update fields if provided
     if user_update.full_name is not None:
         user.full_name = user_update.full_name
@@ -475,13 +541,15 @@ async def update_user(
         user.role = user_update.role
     if user_update.is_active is not None:
         user.is_active = user_update.is_active
-    
+
     user.updated_at = datetime.utcnow()
     db.commit()
-    
+
     return {"message": f"User {user_id} updated successfully"}
 
+
 # ============= Helper Functions =============
+
 
 async def process_run_queue():
     """Process queued simulation runs"""
@@ -490,30 +558,37 @@ async def process_run_queue():
         # TODO: Implement actual queue processing with Celery/Redis
         logger.debug("Processing run queue...")
 
+
 async def queue_run_for_processing(run_id: str):
     """Add run to processing queue"""
     # TODO: Implement with Redis/RabbitMQ
     logger.info(f"Run {run_id} queued for processing")
 
+
 def get_queue_position(run_id: str, db: Session) -> int:
     """Get position in queue"""
     # Count queued runs before this one
-    position = db.query(RunModel).filter(
-        RunModel.status == RunStatus.QUEUED.value,
-        RunModel.created_at < db.query(RunModel.created_at).filter(
-            RunModel.id == run_id
-        ).scalar()
-    ).count()
+    position = (
+        db.query(RunModel)
+        .filter(
+            RunModel.status == RunStatus.QUEUED.value,
+            RunModel.created_at
+            < db.query(RunModel.created_at).filter(RunModel.id == run_id).scalar(),
+        )
+        .count()
+    )
     return position + 1
+
 
 # ============= Main Entry Point =============
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         app,
         host=settings.api_host,
         port=settings.api_port,
         reload=settings.debug,
-        log_level=settings.log_level.lower()
+        log_level=settings.log_level.lower(),
     )
