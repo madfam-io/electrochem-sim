@@ -6,9 +6,32 @@
 
 ---
 
+## Current Status (2026-07-04)
+
+Galvana is a real **MVP with a working physics core (~9k lines of Python)** —
+but it is **not production-ready**, and the repository has been **dormant since
+2025-11** (last commit 2025-11-30).
+
+- **Implemented:** FastAPI gateway with auth (`services/api`), hardware
+  abstraction layer with mock drivers (`services/hal`), FEniCSx simulation
+  worker (`workers/sim-fenicsx`), Next.js web app (`apps/web`), CI, and Docker
+  packaging.
+- **Advertised below but absent from the repo:** the Python and JS SDKs
+  (`packages/` does not exist), the MOOSE worker (`workers/sim-moose`), the
+  orchestrator service (`services/orchestrator`), and `infra/terraform` /
+  `infra/helm` (only `infra/compose` exists).
+- **Testing is thin:** 5 test files (~900 lines) against ~8.3k lines of source.
+- Treat the enterprise claims (SSO/SAML, RBAC/ABAC, audit logs, on-prem K8s) as
+  roadmap targets, not verified capabilities.
+
+Read the feature list and monorepo layout below as a mix of the working MVP
+plus **vision/roadmap** for the missing pieces above.
+
+---
+
 ## At a glance
 
-* **What it is:** A production‑ready platform to model electrochemical processes (batteries, plating/corrosion, fuel cells/electrolyzers), run experiments (CV/CA/CP/EIS), and close the loop with instrument‑in‑the‑loop calibration.
+* **What it is:** A platform to model electrochemical processes (batteries, plating/corrosion, fuel cells/electrolyzers), run experiments (CV/CA/CP/EIS), and close the loop with instrument‑in‑the‑loop calibration. Production readiness is a goal, not the current state — see [Current Status](#current-status-2026-07-04).
 * **Core value:** First‑principles models you can audit + live lab control + enterprise controls (SSO/RBAC, audit logs, APIs).
 * **Default cloud stack:** **Vercel** (web) + **Railway** (APIs, workers, data plane). On‑prem K8s supported.
 
@@ -24,7 +47,7 @@
 
 ---
 
-## Monorepo layout
+## Monorepo layout (target — several entries not yet present; see Current Status)
 
 ```
 /                           # root
